@@ -100,7 +100,7 @@ func (s *Store) ensureIndexes(ctx context.Context) error {
 			Keys: bson.D{{Key: "stream", Value: 1}, {Key: "dedup_key", Value: 1}},
 			Options: options.Index().
 				SetUnique(true).
-				SetPartialFilterExpression(bson.D{{Key: "dedup_key", Value: bson.D{{Key: "$ne", Value: ""}}}}),
+				SetPartialFilterExpression(bson.D{{Key: "dedup_key", Value: bson.D{{Key: "$gt", Value: ""}}}}),
 		},
 	}
 	_, err := s.coll.Indexes().CreateMany(ctx, models)

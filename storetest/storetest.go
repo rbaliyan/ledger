@@ -198,10 +198,12 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 	})
 
 	t.Run("SchemaVersion", func(t *testing.T) {
-		store.Append(ctx, "test-schema", ledger.RawEntry{
+		if _, err := store.Append(ctx, "test-schema", ledger.RawEntry{
 			Payload:       []byte(`{}`),
 			SchemaVersion: 3,
-		})
+		}); err != nil {
+			t.Fatalf("append: %v", err)
+		}
 		entries, err := store.Read(ctx, "test-schema")
 		if err != nil {
 			t.Fatalf("Read: %v", err)
@@ -215,8 +217,12 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 	})
 
 	t.Run("StreamIsolation", func(t *testing.T) {
-		store.Append(ctx, "test-iso-a", ledger.RawEntry{Payload: []byte(`{}`), SchemaVersion: 1})
-		store.Append(ctx, "test-iso-b", ledger.RawEntry{Payload: []byte(`{}`), SchemaVersion: 1})
+		if _, err := store.Append(ctx, "test-iso-a", ledger.RawEntry{Payload: []byte(`{}`), SchemaVersion: 1}); err != nil {
+			t.Fatalf("append a: %v", err)
+		}
+		if _, err := store.Append(ctx, "test-iso-b", ledger.RawEntry{Payload: []byte(`{}`), SchemaVersion: 1}); err != nil {
+			t.Fatalf("append b: %v", err)
+		}
 
 		a, _ := store.Read(ctx, "test-iso-a")
 		b, _ := store.Read(ctx, "test-iso-b")

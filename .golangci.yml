@@ -19,4 +19,9 @@ linters:
         - (*database/sql.Tx).Rollback
         - (*database/sql.Rows).Close
         - (*database/sql.Stmt).Close
-        - (go.mongodb.org/mongo-driver/v2/mongo.Cursor).Close
+        - (*go.mongodb.org/mongo-driver/v2/mongo.Cursor).Close
+  exclusions:
+    rules:
+      - path: storetest/
+        linters:
+          - errcheck
