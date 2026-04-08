@@ -24,6 +24,12 @@ func (mockStore) Read(_ context.Context, _ string, _ ...ledger.ReadOption) ([]le
 
 func (mockStore) Count(_ context.Context, _ string) (int64, error) { return 0, nil }
 
+func (mockStore) SetTags(_ context.Context, _ string, _ int64, _ []string) error { return nil }
+
+func (mockStore) SetAnnotations(_ context.Context, _ string, _ int64, _ map[string]*string) error {
+	return nil
+}
+
 func (mockStore) Trim(_ context.Context, _ string, _ int64) (int64, error) { return 0, nil }
 
 func (mockStore) Close(_ context.Context) error { return nil }

@@ -20,4 +20,7 @@ var (
 
 	// ErrInvalidName is returned when a table or collection name is invalid.
 	ErrInvalidName = errors.New("ledger: invalid table/collection name")
+
+	// ErrEntryNotFound is returned when SetTags or SetAnnotations targets a non-existent entry.
+	ErrEntryNotFound = errors.New("ledger: entry not found")
 )

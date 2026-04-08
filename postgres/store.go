@@ -23,7 +23,6 @@ import (
 	"github.com/rbaliyan/ledger"
 )
 
-// sqlExecutor is the common interface between *sql.DB and *sql.Tx.
 type sqlExecutor interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
 	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
@@ -53,7 +52,6 @@ type options struct {
 }
 
 // WithTable sets the table name. Defaults to "ledger_entries".
-// The name must be a valid SQL identifier (alphanumeric and underscore).
 func WithTable(name string) Option {
 	return func(o *options) { o.table = name }
 }
@@ -64,7 +62,7 @@ func WithLogger(l *slog.Logger) Option {
 }
 
 // New creates a new PostgreSQL ledger store. The table and indexes are created
-// automatically. The caller is responsible for opening and closing the *sql.DB.
+// automatically. Tag GIN indexes are created asynchronously in the background.
 func New(ctx context.Context, db *sql.DB, opts ...Option) (*Store, error) {
 	if db == nil {
 		return nil, fmt.Errorf("ledger/postgres: db must not be nil")
@@ -81,6 +79,7 @@ func New(ctx context.Context, db *sql.DB, opts ...Option) (*Store, error) {
 	if err := s.createTable(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/postgres: create table: %w", err)
 	}
+	go s.createAsyncIndexes(o.logger)
 	return s, nil
 }
 
@@ -94,28 +93,38 @@ func (s *Store) createTable(ctx context.Context) error {
 			dedup_key      TEXT        NOT NULL DEFAULT '',
 			schema_version INTEGER     NOT NULL DEFAULT 1,
 			metadata       JSONB,
-			created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+			tags           JSONB       NOT NULL DEFAULT '[]'::jsonb,
+			annotations    JSONB,
+			created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+			updated_at     TIMESTAMPTZ
 		)`, s.table)
 	if _, err := s.db.ExecContext(ctx, query); err != nil {
 		return err
 	}
 
-	idx := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_%s_stream_id ON %s(stream, id)`, s.table, s.table)
-	if _, err := s.db.ExecContext(ctx, idx); err != nil {
-		return err
+	for _, idx := range []string{
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_%s_stream_id ON %s(stream, id)`, s.table, s.table),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_%s_stream_order ON %s(stream, order_key, id)`, s.table, s.table),
+		fmt.Sprintf(`CREATE UNIQUE INDEX IF NOT EXISTS idx_%s_dedup ON %s(stream, dedup_key) WHERE dedup_key != ''`, s.table, s.table),
+	} {
+		if _, err := s.db.ExecContext(ctx, idx); err != nil {
+			return err
+		}
 	}
-
-	idx = fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_%s_stream_order ON %s(stream, order_key, id)`, s.table, s.table)
-	if _, err := s.db.ExecContext(ctx, idx); err != nil {
-		return err
-	}
-
-	idx = fmt.Sprintf(`CREATE UNIQUE INDEX IF NOT EXISTS idx_%s_dedup ON %s(stream, dedup_key) WHERE dedup_key != ''`, s.table, s.table)
-	_, err := s.db.ExecContext(ctx, idx)
-	return err
+	return nil
 }
 
-// executor returns the *sql.Tx from context if present, otherwise s.db.
+func (s *Store) createAsyncIndexes(logger *slog.Logger) {
+	if s.closed.Load() {
+		return
+	}
+	// GIN index for tag-based filtering. Created async to avoid blocking startup.
+	idx := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_%s_tags ON %s USING gin(tags)`, s.table, s.table)
+	if _, err := s.db.Exec(idx); err != nil && !s.closed.Load() {
+		logger.Warn("failed to create tags GIN index", "error", err)
+	}
+}
+
 func (s *Store) executor(ctx context.Context) sqlExecutor {
 	if tx, ok := ledger.TxFromContext(ctx).(*sql.Tx); ok {
 		return tx
@@ -124,10 +133,6 @@ func (s *Store) executor(ctx context.Context) sqlExecutor {
 }
 
 // Append adds entries to the named stream. Returns IDs of newly appended entries.
-//
-// If the context carries a *sql.Tx via [ledger.WithTx], the store uses that
-// transaction instead of creating its own. The caller is responsible for
-// committing or rolling back the transaction.
 func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.RawEntry) ([]int64, error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
@@ -150,8 +155,8 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 	}
 
 	query := fmt.Sprintf(
-		`INSERT INTO %s (stream, payload, order_key, dedup_key, schema_version, metadata)
-		 VALUES ($1, $2, $3, $4, $5, $6)
+		`INSERT INTO %s (stream, payload, order_key, dedup_key, schema_version, metadata, tags)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 ON CONFLICT (stream, dedup_key) WHERE dedup_key != '' DO NOTHING
 		 RETURNING id`,
 		s.table,
@@ -164,13 +169,18 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 
 	var ids []int64
 	for _, e := range entries {
-		meta, err := encodeMetadata(e.Metadata)
+		meta, err := encodeJSONB(e.Metadata)
 		if err != nil {
 			return nil, fmt.Errorf("ledger/postgres: encode metadata: %w", err)
 		}
+		tags := e.Tags
+		if tags == nil {
+			tags = []string{}
+		}
+		tagsJSON, _ := json.Marshal(tags)
 
 		var id int64
-		err = stmt.QueryRowContext(ctx, stream, e.Payload, e.OrderKey, e.DedupKey, e.SchemaVersion, meta).Scan(&id)
+		err = stmt.QueryRowContext(ctx, stream, e.Payload, e.OrderKey, e.DedupKey, e.SchemaVersion, meta, tagsJSON).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			s.logger.DebugContext(ctx, "dedup skip", "stream", stream, "dedup_key", e.DedupKey)
 			continue
@@ -190,9 +200,6 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 }
 
 // Read returns entries from the named stream.
-//
-// If the context carries a *sql.Tx via [ledger.WithTx], reads use that
-// transaction for read-your-writes consistency.
 func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[int64], error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
@@ -231,6 +238,19 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 		args = append(args, key)
 	}
 
+	if tag := o.Tag(); tag != "" {
+		argN++
+		clauses = append(clauses, fmt.Sprintf("tags @> $%d::jsonb", argN))
+		tagJSON, _ := json.Marshal([]string{tag})
+		args = append(args, string(tagJSON))
+	}
+	if allTags := o.AllTags(); len(allTags) > 0 {
+		argN++
+		clauses = append(clauses, fmt.Sprintf("tags @> $%d::jsonb", argN))
+		tagsJSON, _ := json.Marshal(allTags)
+		args = append(args, string(tagsJSON))
+	}
+
 	dir := "ASC"
 	if o.Order() == ledger.Descending {
 		dir = "DESC"
@@ -238,7 +258,7 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 
 	argN++
 	query := fmt.Sprintf(
-		`SELECT id, stream, payload, order_key, dedup_key, schema_version, metadata, created_at FROM %s WHERE %s ORDER BY id %s LIMIT $%d`,
+		`SELECT id, stream, payload, order_key, dedup_key, schema_version, metadata, tags, annotations, created_at, updated_at FROM %s WHERE %s ORDER BY id %s LIMIT $%d`,
 		s.table, strings.Join(clauses, " AND "), dir, argN,
 	)
 	args = append(args, o.Limit())
@@ -252,18 +272,26 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 	var entries []ledger.StoredEntry[int64]
 	for rows.Next() {
 		var (
-			e    ledger.StoredEntry[int64]
-			meta []byte
+			e           ledger.StoredEntry[int64]
+			meta        []byte
+			tagsJSON    []byte
+			annotations []byte
+			updatedAt   sql.NullTime
 		)
-		if err := rows.Scan(&e.ID, &e.Stream, &e.Payload, &e.OrderKey, &e.DedupKey, &e.SchemaVersion, &meta, &e.CreatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.Stream, &e.Payload, &e.OrderKey, &e.DedupKey, &e.SchemaVersion, &meta, &tagsJSON, &annotations, &e.CreatedAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("ledger/postgres: scan: %w", err)
 		}
 		if len(meta) > 0 {
-			m, err := decodeMetadata(meta)
-			if err != nil {
-				return nil, fmt.Errorf("ledger/postgres: decode metadata: %w", err)
-			}
-			e.Metadata = m
+			e.Metadata, _ = decodeJSONB(meta)
+		}
+		if len(tagsJSON) > 0 {
+			json.Unmarshal(tagsJSON, &e.Tags) //nolint:errcheck
+		}
+		if len(annotations) > 0 {
+			e.Annotations, _ = decodeJSONB(annotations)
+		}
+		if updatedAt.Valid {
+			e.UpdatedAt = &updatedAt.Time
 		}
 		entries = append(entries, e)
 	}
@@ -279,12 +307,68 @@ func (s *Store) Count(ctx context.Context, stream string) (int64, error) {
 		return 0, ledger.ErrStoreClosed
 	}
 	exec := s.executor(ctx)
-	query := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE stream = $1`, s.table)
 	var count int64
-	if err := exec.QueryRowContext(ctx, query, stream).Scan(&count); err != nil {
+	if err := exec.QueryRowContext(ctx, fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE stream = $1`, s.table), stream).Scan(&count); err != nil {
 		return 0, fmt.Errorf("ledger/postgres: count: %w", err)
 	}
 	return count, nil
+}
+
+// SetTags replaces all tags on an entry.
+func (s *Store) SetTags(ctx context.Context, stream string, id int64, tags []string) error {
+	if s.closed.Load() {
+		return ledger.ErrStoreClosed
+	}
+	if tags == nil {
+		tags = []string{}
+	}
+	tagsJSON, _ := json.Marshal(tags)
+	exec := s.executor(ctx)
+	res, err := exec.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET tags = $1::jsonb, updated_at = now() WHERE stream = $2 AND id = $3`, s.table), string(tagsJSON), stream, id)
+	if err != nil {
+		return fmt.Errorf("ledger/postgres: set tags: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ledger.ErrEntryNotFound
+	}
+	return nil
+}
+
+// SetAnnotations merges annotations into an entry. Keys with nil values are deleted.
+func (s *Store) SetAnnotations(ctx context.Context, stream string, id int64, annotations map[string]*string) error {
+	if s.closed.Load() {
+		return ledger.ErrStoreClosed
+	}
+	exec := s.executor(ctx)
+
+	// Read current
+	var raw []byte
+	err := exec.QueryRowContext(ctx, fmt.Sprintf(`SELECT COALESCE(annotations, '{}'::jsonb) FROM %s WHERE stream = $1 AND id = $2`, s.table), stream, id).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ledger.ErrEntryNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("ledger/postgres: read annotations: %w", err)
+	}
+
+	current := make(map[string]string)
+	json.Unmarshal(raw, &current) //nolint:errcheck
+
+	for k, v := range annotations {
+		if v == nil {
+			delete(current, k)
+		} else {
+			current[k] = *v
+		}
+	}
+
+	data, _ := json.Marshal(current)
+	_, err = exec.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET annotations = $1::jsonb, updated_at = now() WHERE stream = $2 AND id = $3`, s.table), string(data), stream, id)
+	if err != nil {
+		return fmt.Errorf("ledger/postgres: set annotations: %w", err)
+	}
+	return nil
 }
 
 // Trim deletes entries from the named stream with IDs <= beforeID.
@@ -293,19 +377,15 @@ func (s *Store) Trim(ctx context.Context, stream string, beforeID int64) (int64,
 		return 0, ledger.ErrStoreClosed
 	}
 	exec := s.executor(ctx)
-	query := fmt.Sprintf(`DELETE FROM %s WHERE stream = $1 AND id <= $2`, s.table)
-	res, err := exec.ExecContext(ctx, query, stream, beforeID)
+	res, err := exec.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE stream = $1 AND id <= $2`, s.table), stream, beforeID)
 	if err != nil {
 		return 0, fmt.Errorf("ledger/postgres: trim: %w", err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("ledger/postgres: trim rows affected: %w", err)
-	}
+	n, _ := res.RowsAffected()
 	return n, nil
 }
 
-// Health checks database connectivity by pinging the underlying connection.
+// Health checks database connectivity.
 func (s *Store) Health(ctx context.Context) error {
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
@@ -313,21 +393,20 @@ func (s *Store) Health(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
-// Close marks the store as closed. The caller is responsible for closing
-// the underlying *sql.DB.
+// Close marks the store as closed.
 func (s *Store) Close(_ context.Context) error {
 	s.closed.Store(true)
 	return nil
 }
 
-func encodeMetadata(m map[string]string) ([]byte, error) {
+func encodeJSONB(m map[string]string) ([]byte, error) {
 	if len(m) == 0 {
 		return nil, nil
 	}
 	return json.Marshal(m)
 }
 
-func decodeMetadata(data []byte) (map[string]string, error) {
+func decodeJSONB(data []byte) (map[string]string, error) {
 	var m map[string]string
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, err

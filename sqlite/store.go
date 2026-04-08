@@ -64,7 +64,8 @@ func WithLogger(l *slog.Logger) Option {
 }
 
 // New creates a new SQLite ledger store. The table and indexes are created
-// automatically. The caller is responsible for opening and closing the *sql.DB.
+// automatically. Tag indexes are created asynchronously in the background.
+// The caller is responsible for opening and closing the *sql.DB.
 func New(ctx context.Context, db *sql.DB, opts ...Option) (*Store, error) {
 	if db == nil {
 		return nil, fmt.Errorf("ledger/sqlite: db must not be nil")
@@ -81,6 +82,7 @@ func New(ctx context.Context, db *sql.DB, opts ...Option) (*Store, error) {
 	if err := s.createTable(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/sqlite: create table: %w", err)
 	}
+	go s.createAsyncIndexes(o.logger)
 	return s, nil
 }
 
@@ -94,7 +96,10 @@ func (s *Store) createTable(ctx context.Context) error {
 			dedup_key      TEXT    NOT NULL DEFAULT '',
 			schema_version INTEGER NOT NULL DEFAULT 1,
 			metadata       TEXT,
-			created_at     TEXT    NOT NULL DEFAULT (strftime('%%Y-%%m-%%dT%%H:%%M:%%f','now'))
+			tags           TEXT    NOT NULL DEFAULT '[]',
+			annotations    TEXT,
+			created_at     TEXT    NOT NULL DEFAULT (strftime('%%Y-%%m-%%dT%%H:%%M:%%f','now')),
+			updated_at     TEXT
 		)`, s.table)
 	if _, err := s.db.ExecContext(ctx, query); err != nil {
 		return err
@@ -115,6 +120,17 @@ func (s *Store) createTable(ctx context.Context) error {
 	return err
 }
 
+func (s *Store) createAsyncIndexes(logger *slog.Logger) {
+	if s.closed.Load() {
+		return
+	}
+	// Tag-based filtering index. Created async since it's not needed for core operations.
+	idx := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_%s_tags ON %s(stream, tags)`, s.table, s.table)
+	if _, err := s.db.Exec(idx); err != nil && !s.closed.Load() {
+		logger.Warn("failed to create tags index", "error", err)
+	}
+}
+
 // executor returns the *sql.Tx from context if present, otherwise s.db.
 func (s *Store) executor(ctx context.Context) sqlExecutor {
 	if tx, ok := ledger.TxFromContext(ctx).(*sql.Tx); ok {
@@ -124,10 +140,6 @@ func (s *Store) executor(ctx context.Context) sqlExecutor {
 }
 
 // Append adds entries to the named stream. Returns IDs of newly appended entries.
-//
-// If the context carries a *sql.Tx via [ledger.WithTx], the store uses that
-// transaction instead of creating its own. The caller is responsible for
-// committing or rolling back the transaction.
 func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.RawEntry) ([]int64, error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
@@ -138,7 +150,6 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 
 	exec := s.executor(ctx)
 
-	// If no external tx, create our own for atomicity.
 	var ownTx *sql.Tx
 	if _, isExternalTx := exec.(*sql.Tx); !isExternalTx {
 		var err error
@@ -151,7 +162,7 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 	}
 
 	query := fmt.Sprintf(
-		`INSERT OR IGNORE INTO %s (stream, payload, order_key, dedup_key, schema_version, metadata) VALUES (?, ?, ?, ?, ?, ?)`,
+		`INSERT OR IGNORE INTO %s (stream, payload, order_key, dedup_key, schema_version, metadata, tags) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		s.table,
 	)
 	stmt, err := exec.PrepareContext(ctx, query)
@@ -162,12 +173,19 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 
 	var ids []int64
 	for _, e := range entries {
-		meta, err := encodeMetadata(e.Metadata)
+		meta, err := encodeNullableJSON(e.Metadata)
 		if err != nil {
 			return nil, fmt.Errorf("ledger/sqlite: encode metadata: %w", err)
 		}
+		tagsJSON, err := json.Marshal(e.Tags)
+		if err != nil {
+			return nil, fmt.Errorf("ledger/sqlite: encode tags: %w", err)
+		}
+		if e.Tags == nil {
+			tagsJSON = []byte("[]")
+		}
 
-		res, err := stmt.ExecContext(ctx, stream, e.Payload, e.OrderKey, e.DedupKey, e.SchemaVersion, meta)
+		res, err := stmt.ExecContext(ctx, stream, e.Payload, e.OrderKey, e.DedupKey, e.SchemaVersion, meta, string(tagsJSON))
 		if err != nil {
 			return nil, fmt.Errorf("ledger/sqlite: insert: %w", err)
 		}
@@ -195,9 +213,6 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 }
 
 // Read returns entries from the named stream.
-//
-// If the context carries a *sql.Tx via [ledger.WithTx], reads use that
-// transaction for read-your-writes consistency.
 func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[int64], error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
@@ -231,13 +246,22 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 		args = append(args, key)
 	}
 
+	if tag := o.Tag(); tag != "" {
+		clauses = append(clauses, "EXISTS (SELECT 1 FROM json_each(tags) WHERE json_each.value = ?)")
+		args = append(args, tag)
+	}
+	for _, tag := range o.AllTags() {
+		clauses = append(clauses, "EXISTS (SELECT 1 FROM json_each(tags) WHERE json_each.value = ?)")
+		args = append(args, tag)
+	}
+
 	dir := "ASC"
 	if o.Order() == ledger.Descending {
 		dir = "DESC"
 	}
 
 	query := fmt.Sprintf(
-		`SELECT id, stream, payload, order_key, dedup_key, schema_version, metadata, created_at FROM %s WHERE %s ORDER BY id %s LIMIT ?`,
+		`SELECT id, stream, payload, order_key, dedup_key, schema_version, metadata, tags, annotations, created_at, updated_at FROM %s WHERE %s ORDER BY id %s LIMIT ?`,
 		s.table, strings.Join(clauses, " AND "), dir,
 	)
 	args = append(args, o.Limit())
@@ -251,25 +275,45 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 	var entries []ledger.StoredEntry[int64]
 	for rows.Next() {
 		var (
-			e         ledger.StoredEntry[int64]
-			meta      sql.NullString
-			createdAt string
+			e           ledger.StoredEntry[int64]
+			meta        sql.NullString
+			tagsJSON    string
+			annotations sql.NullString
+			createdAt   string
+			updatedAt   sql.NullString
 		)
-		if err := rows.Scan(&e.ID, &e.Stream, &e.Payload, &e.OrderKey, &e.DedupKey, &e.SchemaVersion, &meta, &createdAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.Stream, &e.Payload, &e.OrderKey, &e.DedupKey, &e.SchemaVersion, &meta, &tagsJSON, &annotations, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("ledger/sqlite: scan: %w", err)
 		}
 		if meta.Valid {
-			m, err := decodeMetadata(meta.String)
+			m, err := decodeStringMap(meta.String)
 			if err != nil {
 				return nil, fmt.Errorf("ledger/sqlite: decode metadata: %w", err)
 			}
 			e.Metadata = m
+		}
+		if err := json.Unmarshal([]byte(tagsJSON), &e.Tags); err != nil {
+			return nil, fmt.Errorf("ledger/sqlite: decode tags: %w", err)
+		}
+		if annotations.Valid {
+			m, err := decodeStringMap(annotations.String)
+			if err != nil {
+				return nil, fmt.Errorf("ledger/sqlite: decode annotations: %w", err)
+			}
+			e.Annotations = m
 		}
 		t, err := time.Parse("2006-01-02T15:04:05.000", createdAt)
 		if err != nil {
 			return nil, fmt.Errorf("ledger/sqlite: parse created_at: %w", err)
 		}
 		e.CreatedAt = t
+		if updatedAt.Valid {
+			ut, err := time.Parse("2006-01-02T15:04:05.000", updatedAt.String)
+			if err != nil {
+				return nil, fmt.Errorf("ledger/sqlite: parse updated_at: %w", err)
+			}
+			e.UpdatedAt = &ut
+		}
 		entries = append(entries, e)
 	}
 	if err := rows.Err(); err != nil {
@@ -290,6 +334,75 @@ func (s *Store) Count(ctx context.Context, stream string) (int64, error) {
 		return 0, fmt.Errorf("ledger/sqlite: count: %w", err)
 	}
 	return count, nil
+}
+
+// SetTags replaces all tags on an entry.
+func (s *Store) SetTags(ctx context.Context, stream string, id int64, tags []string) error {
+	if s.closed.Load() {
+		return ledger.ErrStoreClosed
+	}
+	if tags == nil {
+		tags = []string{}
+	}
+	tagsJSON, err := json.Marshal(tags)
+	if err != nil {
+		return fmt.Errorf("ledger/sqlite: encode tags: %w", err)
+	}
+	exec := s.executor(ctx)
+	query := fmt.Sprintf(`UPDATE %s SET tags = ?, updated_at = strftime('%%Y-%%m-%%dT%%H:%%M:%%f','now') WHERE stream = ? AND id = ?`, s.table)
+	res, err := exec.ExecContext(ctx, query, string(tagsJSON), stream, id)
+	if err != nil {
+		return fmt.Errorf("ledger/sqlite: set tags: %w", err)
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return ledger.ErrEntryNotFound
+	}
+	return nil
+}
+
+// SetAnnotations merges annotations into an entry. Keys with nil values are deleted.
+func (s *Store) SetAnnotations(ctx context.Context, stream string, id int64, annotations map[string]*string) error {
+	if s.closed.Load() {
+		return ledger.ErrStoreClosed
+	}
+	exec := s.executor(ctx)
+
+	// Read current annotations.
+	query := fmt.Sprintf(`SELECT annotations FROM %s WHERE stream = ? AND id = ?`, s.table)
+	var raw sql.NullString
+	if err := exec.QueryRowContext(ctx, query, stream, id).Scan(&raw); err != nil {
+		if err == sql.ErrNoRows {
+			return ledger.ErrEntryNotFound
+		}
+		return fmt.Errorf("ledger/sqlite: read annotations: %w", err)
+	}
+
+	current := make(map[string]string)
+	if raw.Valid {
+		json.Unmarshal([]byte(raw.String), &current) //nolint:errcheck
+	}
+
+	// Merge: set or delete.
+	for k, v := range annotations {
+		if v == nil {
+			delete(current, k)
+		} else {
+			current[k] = *v
+		}
+	}
+
+	data, err := json.Marshal(current)
+	if err != nil {
+		return fmt.Errorf("ledger/sqlite: encode annotations: %w", err)
+	}
+
+	update := fmt.Sprintf(`UPDATE %s SET annotations = ?, updated_at = strftime('%%Y-%%m-%%dT%%H:%%M:%%f','now') WHERE stream = ? AND id = ?`, s.table)
+	_, err = exec.ExecContext(ctx, update, string(data), stream, id)
+	if err != nil {
+		return fmt.Errorf("ledger/sqlite: set annotations: %w", err)
+	}
+	return nil
 }
 
 // Trim deletes entries from the named stream with IDs <= beforeID.
@@ -325,7 +438,7 @@ func (s *Store) Close(_ context.Context) error {
 	return nil
 }
 
-func encodeMetadata(m map[string]string) (sql.NullString, error) {
+func encodeNullableJSON(m map[string]string) (sql.NullString, error) {
 	if len(m) == 0 {
 		return sql.NullString{}, nil
 	}
@@ -336,7 +449,7 @@ func encodeMetadata(m map[string]string) (sql.NullString, error) {
 	return sql.NullString{String: string(data), Valid: true}, nil
 }
 
-func decodeMetadata(s string) (map[string]string, error) {
+func decodeStringMap(s string) (map[string]string, error) {
 	var m map[string]string
 	if err := json.Unmarshal([]byte(s), &m); err != nil {
 		return nil, err

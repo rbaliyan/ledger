@@ -19,6 +19,9 @@ func openTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
+	// In-memory SQLite: each connection gets its own DB. Limit to 1 so
+	// CREATE TABLE and INSERT use the same underlying database.
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
 	return db
 }

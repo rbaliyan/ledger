@@ -8,6 +8,10 @@
 // Streams are cheap to create — one per operation, then discard. Schema versioning
 // with [Upcaster] chains enables safe payload evolution without downtime.
 //
+// Each entry has immutable fields (Payload, OrderKey, DedupKey, SchemaVersion, Metadata,
+// CreatedAt) set at append time, and mutable fields (Tags, Annotations) that can be
+// updated after the entry is written.
+//
 // Backends: sqlite, postgres, mongodb.
 package ledger
 
@@ -22,6 +26,9 @@ import (
 // Append semantics: SQL backends (sqlite, postgres) use transactions for atomic
 // batch inserts. The MongoDB backend uses InsertMany with ordered:false, meaning
 // partial success is possible on non-dedup errors.
+//
+// Transaction support: pass a *sql.Tx or *mongo.Session via [WithTx] to have
+// operations participate in an external transaction.
 type Store[I comparable] interface {
 	// Append adds entries to the named stream. Returns the IDs of newly appended entries.
 	// Entries with a non-empty DedupKey that already exists in the stream are silently skipped.
@@ -33,6 +40,15 @@ type Store[I comparable] interface {
 
 	// Count returns the number of entries in the named stream.
 	Count(ctx context.Context, stream string) (int64, error)
+
+	// SetTags replaces all tags on an entry. Tags are mutable labels for
+	// categorization and filtering (e.g., "processed", "archived").
+	SetTags(ctx context.Context, stream string, id I, tags []string) error
+
+	// SetAnnotations merges annotations into an entry. Existing keys are
+	// overwritten, new keys are added, and keys with nil values are deleted.
+	// Annotations are mutable key-value metadata (e.g., "processed_at", "error").
+	SetAnnotations(ctx context.Context, stream string, id I, annotations map[string]*string) error
 
 	// Trim deletes entries from the named stream with IDs less than or equal to beforeID.
 	// Returns the number of entries deleted.
@@ -55,7 +71,8 @@ type RawEntry struct {
 	OrderKey      string            // Ordering key for filtering (e.g., aggregate ID).
 	DedupKey      string            // Deduplication key. Empty means no dedup.
 	SchemaVersion int               // Schema version of the payload.
-	Metadata      map[string]string // Arbitrary key-value metadata.
+	Metadata      map[string]string // Arbitrary immutable key-value metadata.
+	Tags          []string          // Initial tags (mutable after append via SetTags).
 }
 
 // StoredEntry is a raw entry read back from the store, including its assigned ID and timestamp.
@@ -66,8 +83,11 @@ type StoredEntry[I comparable] struct {
 	OrderKey      string            // Ordering key.
 	DedupKey      string            // Deduplication key.
 	SchemaVersion int               // Schema version at write time.
-	Metadata      map[string]string // Arbitrary key-value metadata.
+	Metadata      map[string]string // Immutable key-value metadata (set at append).
+	Tags          []string          // Mutable tags (updated via SetTags).
+	Annotations   map[string]string // Mutable annotations (updated via SetAnnotations).
 	CreatedAt     time.Time         // Timestamp when the entry was stored.
+	UpdatedAt     *time.Time        // Timestamp of last tag/annotation update, nil if never updated.
 }
 
 // Order specifies the sort direction when reading entries.
@@ -97,6 +117,8 @@ type ReadOptions struct {
 	limit    int
 	orderKey string
 	order    Order
+	tag      string
+	allTags  []string
 }
 
 // Limit returns the maximum number of entries to return.
@@ -110,6 +132,12 @@ func (o ReadOptions) OrderKeyFilter() string { return o.orderKey }
 
 // HasAfter reports whether a cursor was set.
 func (o ReadOptions) HasAfter() bool { return o.after != nil }
+
+// Tag returns the single-tag filter, or empty string if not set.
+func (o ReadOptions) Tag() string { return o.tag }
+
+// AllTags returns the all-tags filter, or nil if not set.
+func (o ReadOptions) AllTags() []string { return o.allTags }
 
 func defaultReadOptions() ReadOptions {
 	return ReadOptions{
@@ -167,4 +195,14 @@ func WithOrderKey(key string) ReadOption {
 // Desc returns a ReadOption that reads entries in descending order (newest first).
 func Desc() ReadOption {
 	return func(o *ReadOptions) { o.order = Descending }
+}
+
+// WithTag returns a ReadOption that filters entries having a specific tag.
+func WithTag(tag string) ReadOption {
+	return func(o *ReadOptions) { o.tag = tag }
+}
+
+// WithAllTags returns a ReadOption that filters entries having ALL specified tags.
+func WithAllTags(tags ...string) ReadOption {
+	return func(o *ReadOptions) { o.allTags = tags }
 }

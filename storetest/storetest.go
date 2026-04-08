@@ -282,6 +282,126 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 		_ = lastID // suppress unused
 	})
 
+	t.Run("SetTags", func(t *testing.T) {
+		ids, err := store.Append(ctx, "test-tags", ledger.RawEntry{
+			Payload: []byte(`{}`), SchemaVersion: 1, Tags: []string{"initial"},
+		})
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		id := ids[0]
+
+		// Verify initial tag
+		entries, _ := store.Read(ctx, "test-tags")
+		if len(entries) != 1 || len(entries[0].Tags) != 1 || entries[0].Tags[0] != "initial" {
+			t.Fatalf("initial tags = %v", entries[0].Tags)
+		}
+
+		// Update tags
+		if err := store.SetTags(ctx, "test-tags", id, []string{"processed", "reviewed"}); err != nil {
+			t.Fatalf("SetTags: %v", err)
+		}
+
+		entries, _ = store.Read(ctx, "test-tags")
+		if len(entries[0].Tags) != 2 {
+			t.Errorf("tags after update = %v, want [processed reviewed]", entries[0].Tags)
+		}
+		if entries[0].UpdatedAt == nil {
+			t.Error("UpdatedAt should be set after SetTags")
+		}
+	})
+
+	t.Run("SetAnnotations", func(t *testing.T) {
+		ids, err := store.Append(ctx, "test-annot", ledger.RawEntry{
+			Payload: []byte(`{}`), SchemaVersion: 1,
+		})
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		id := ids[0]
+
+		// Set annotations
+		v1 := "2026-04-08"
+		v2 := "bot"
+		if err := store.SetAnnotations(ctx, "test-annot", id, map[string]*string{
+			"processed_at": &v1,
+			"processed_by": &v2,
+		}); err != nil {
+			t.Fatalf("SetAnnotations: %v", err)
+		}
+
+		entries, _ := store.Read(ctx, "test-annot")
+		if entries[0].Annotations["processed_at"] != "2026-04-08" {
+			t.Errorf("annotations = %v", entries[0].Annotations)
+		}
+
+		// Merge: add new key, delete existing key
+		v3 := "success"
+		if err := store.SetAnnotations(ctx, "test-annot", id, map[string]*string{
+			"status":       &v3,
+			"processed_by": nil, // delete
+		}); err != nil {
+			t.Fatalf("SetAnnotations merge: %v", err)
+		}
+
+		entries, _ = store.Read(ctx, "test-annot")
+		a := entries[0].Annotations
+		if a["status"] != "success" {
+			t.Errorf("status = %q, want success", a["status"])
+		}
+		if _, ok := a["processed_by"]; ok {
+			t.Error("processed_by should be deleted")
+		}
+		if a["processed_at"] != "2026-04-08" {
+			t.Error("processed_at should be preserved")
+		}
+	})
+
+	t.Run("SetTags_NotFound", func(t *testing.T) {
+		var zeroID I
+		err := store.SetTags(ctx, "test-nonexistent", zeroID, []string{"x"})
+		if !errors.Is(err, ledger.ErrEntryNotFound) {
+			t.Errorf("SetTags on missing entry: %v, want ErrEntryNotFound", err)
+		}
+	})
+
+	t.Run("WithTagFilter", func(t *testing.T) {
+		for _, tag := range []string{"a", "b"} {
+			if _, err := store.Append(ctx, "test-tag-filter", ledger.RawEntry{
+				Payload: []byte(`{}`), SchemaVersion: 1, Tags: []string{tag, "common"},
+			}); err != nil {
+				t.Fatalf("append: %v", err)
+			}
+		}
+
+		// Filter by single tag
+		entries, err := store.Read(ctx, "test-tag-filter", ledger.WithTag("a"))
+		if err != nil {
+			t.Fatalf("WithTag: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Errorf("WithTag(a): got %d, want 1", len(entries))
+		}
+
+		// Filter by common tag
+		entries, err = store.Read(ctx, "test-tag-filter", ledger.WithTag("common"))
+		if err != nil {
+			t.Fatalf("WithTag common: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Errorf("WithTag(common): got %d, want 2", len(entries))
+		}
+
+		// Filter by all tags
+		entries, err = store.Read(ctx, "test-tag-filter", ledger.WithAllTags("a", "common"))
+		if err != nil {
+			t.Fatalf("WithAllTags: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Errorf("WithAllTags(a, common): got %d, want 1", len(entries))
+		}
+	})
+
 	t.Run("ClosedStoreErrors", func(t *testing.T) {
 		// Test with a separate store is too complex for a generic suite.
 		// Backend-specific tests cover this. Verify the error type exists.

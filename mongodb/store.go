@@ -9,9 +9,8 @@
 // occurs, partial inserts may be committed. SQL backends use transactions for
 // atomic batch inserts.
 //
-// Transaction support: pass a mongo.Session via [ledger.WithTx] to have
-// operations participate in an external MongoDB transaction. The session must
-// already have an active transaction started by the caller.
+// Transaction support: pass a *mongo.Session via [ledger.WithTx] to have
+// operations participate in an external MongoDB transaction.
 package mongodb
 
 import (
@@ -28,7 +27,7 @@ import (
 )
 
 var (
-	_ ledger.Store[string]  = (*Store)(nil)
+	_ ledger.Store[string] = (*Store)(nil)
 	_ ledger.HealthChecker = (*Store)(nil)
 )
 
@@ -40,7 +39,10 @@ type entry struct {
 	DedupKey      string            `bson:"dedup_key"`
 	SchemaVersion int               `bson:"schema_version"`
 	Metadata      map[string]string `bson:"metadata,omitempty"`
+	Tags          []string          `bson:"tags"`
+	Annotations   map[string]string `bson:"annotations,omitempty"`
 	CreatedAt     time.Time         `bson:"created_at"`
+	UpdatedAt     *time.Time        `bson:"updated_at,omitempty"`
 }
 
 // Store is a MongoDB ledger store.
@@ -60,7 +62,6 @@ type storeOptions struct {
 }
 
 // WithCollection sets the collection name. Defaults to "ledger_entries".
-// The name must be a valid identifier (alphanumeric and underscore).
 func WithCollection(name string) Option {
 	return func(o *storeOptions) { o.collection = name }
 }
@@ -71,7 +72,7 @@ func WithLogger(l *slog.Logger) Option {
 }
 
 // New creates a new MongoDB ledger store. Indexes are created automatically.
-// The caller is responsible for managing the *mongo.Client lifecycle.
+// Tag multikey indexes are created asynchronously in the background.
 func New(ctx context.Context, db *mongo.Database, opts ...Option) (*Store, error) {
 	if db == nil {
 		return nil, fmt.Errorf("ledger/mongodb: db must not be nil")
@@ -89,17 +90,14 @@ func New(ctx context.Context, db *mongo.Database, opts ...Option) (*Store, error
 	if err := s.ensureIndexes(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/mongodb: ensure indexes: %w", err)
 	}
+	go s.createAsyncIndexes(o.logger)
 	return s, nil
 }
 
 func (s *Store) ensureIndexes(ctx context.Context) error {
 	models := []mongo.IndexModel{
-		{
-			Keys: bson.D{{Key: "stream", Value: 1}, {Key: "_id", Value: 1}},
-		},
-		{
-			Keys: bson.D{{Key: "stream", Value: 1}, {Key: "order_key", Value: 1}, {Key: "_id", Value: 1}},
-		},
+		{Keys: bson.D{{Key: "stream", Value: 1}, {Key: "_id", Value: 1}}},
+		{Keys: bson.D{{Key: "stream", Value: 1}, {Key: "order_key", Value: 1}, {Key: "_id", Value: 1}}},
 		{
 			Keys: bson.D{{Key: "stream", Value: 1}, {Key: "dedup_key", Value: 1}},
 			Options: options.Index().
@@ -111,8 +109,19 @@ func (s *Store) ensureIndexes(ctx context.Context) error {
 	return err
 }
 
-// sessionCtx returns a context bound to a *mongo.Session from ledger.WithTx, if present.
-// MongoDB operations automatically use the session when the context carries one.
+func (s *Store) createAsyncIndexes(logger *slog.Logger) {
+	if s.closed.Load() {
+		return
+	}
+	// Multikey index for tag-based filtering. Created async to avoid blocking startup.
+	model := mongo.IndexModel{
+		Keys: bson.D{{Key: "stream", Value: 1}, {Key: "tags", Value: 1}, {Key: "_id", Value: 1}},
+	}
+	if _, err := s.coll.Indexes().CreateOne(context.Background(), model); err != nil && !s.closed.Load() {
+		logger.Warn("failed to create tags index", "error", err)
+	}
+}
+
 func (s *Store) sessionCtx(ctx context.Context) context.Context {
 	if sess, ok := ledger.TxFromContext(ctx).(*mongo.Session); ok {
 		return mongo.NewSessionContext(ctx, sess)
@@ -120,12 +129,7 @@ func (s *Store) sessionCtx(ctx context.Context) context.Context {
 	return ctx
 }
 
-// Append adds entries to the named stream. Returns IDs (hex-encoded ObjectIDs) of newly appended entries.
-// Entries with duplicate dedup keys are silently skipped.
-//
-// If the context carries a mongo.Session via [ledger.WithTx], the store uses
-// that session's transaction. The caller is responsible for committing or
-// aborting the transaction.
+// Append adds entries to the named stream.
 func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.RawEntry) ([]string, error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
@@ -138,6 +142,10 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 	now := time.Now().UTC()
 	docs := make([]entry, len(entries))
 	for i, e := range entries {
+		tags := e.Tags
+		if tags == nil {
+			tags = []string{}
+		}
 		docs[i] = entry{
 			ID:            bson.NewObjectID(),
 			Stream:        stream,
@@ -146,6 +154,7 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 			DedupKey:      e.DedupKey,
 			SchemaVersion: e.SchemaVersion,
 			Metadata:      e.Metadata,
+			Tags:          tags,
 			CreatedAt:     now,
 		}
 	}
@@ -179,9 +188,6 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 }
 
 // Read returns entries from the named stream.
-//
-// If the context carries a *mongo.Session via [ledger.WithTx], reads use
-// that session for read-your-writes consistency.
 func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[string], error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
@@ -210,6 +216,13 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 
 	if key := o.OrderKeyFilter(); key != "" {
 		filter = append(filter, bson.E{Key: "order_key", Value: key})
+	}
+
+	if tag := o.Tag(); tag != "" {
+		filter = append(filter, bson.E{Key: "tags", Value: tag})
+	}
+	if allTags := o.AllTags(); len(allTags) > 0 {
+		filter = append(filter, bson.E{Key: "tags", Value: bson.D{{Key: "$all", Value: allTags}}})
 	}
 
 	sortDir := 1
@@ -241,13 +254,15 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 			DedupKey:      doc.DedupKey,
 			SchemaVersion: doc.SchemaVersion,
 			Metadata:      doc.Metadata,
+			Tags:          doc.Tags,
+			Annotations:   doc.Annotations,
 			CreatedAt:     doc.CreatedAt,
+			UpdatedAt:     doc.UpdatedAt,
 		})
 	}
 	if err := cursor.Err(); err != nil {
 		return nil, fmt.Errorf("ledger/mongodb: cursor: %w", err)
 	}
-
 	return entries, nil
 }
 
@@ -264,8 +279,74 @@ func (s *Store) Count(ctx context.Context, stream string) (int64, error) {
 	return n, nil
 }
 
-// Trim deletes entries from the named stream with IDs (ObjectIDs) less than or
-// equal to beforeID (hex-encoded ObjectID).
+// SetTags replaces all tags on an entry.
+func (s *Store) SetTags(ctx context.Context, stream string, id string, tags []string) error {
+	if s.closed.Load() {
+		return ledger.ErrStoreClosed
+	}
+	if tags == nil {
+		tags = []string{}
+	}
+	ctx = s.sessionCtx(ctx)
+	oid, err := bson.ObjectIDFromHex(id)
+	if err != nil {
+		return fmt.Errorf("ledger/mongodb: invalid id: %w", err)
+	}
+	now := time.Now().UTC()
+	res, err := s.coll.UpdateOne(ctx,
+		bson.D{{Key: "stream", Value: stream}, {Key: "_id", Value: oid}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "tags", Value: tags}, {Key: "updated_at", Value: now}}}},
+	)
+	if err != nil {
+		return fmt.Errorf("ledger/mongodb: set tags: %w", err)
+	}
+	if res.MatchedCount == 0 {
+		return ledger.ErrEntryNotFound
+	}
+	return nil
+}
+
+// SetAnnotations merges annotations into an entry. Keys with nil values are deleted.
+func (s *Store) SetAnnotations(ctx context.Context, stream string, id string, annotations map[string]*string) error {
+	if s.closed.Load() {
+		return ledger.ErrStoreClosed
+	}
+	ctx = s.sessionCtx(ctx)
+	oid, err := bson.ObjectIDFromHex(id)
+	if err != nil {
+		return fmt.Errorf("ledger/mongodb: invalid id: %w", err)
+	}
+
+	setFields := bson.D{}
+	unsetFields := bson.D{}
+	for k, v := range annotations {
+		if v == nil {
+			unsetFields = append(unsetFields, bson.E{Key: "annotations." + k, Value: ""})
+		} else {
+			setFields = append(setFields, bson.E{Key: "annotations." + k, Value: *v})
+		}
+	}
+
+	now := time.Now().UTC()
+	setFields = append(setFields, bson.E{Key: "updated_at", Value: now})
+
+	update := bson.D{{Key: "$set", Value: setFields}}
+	if len(unsetFields) > 0 {
+		update = append(update, bson.E{Key: "$unset", Value: unsetFields})
+	}
+
+	filter := bson.D{{Key: "stream", Value: stream}, {Key: "_id", Value: oid}}
+	res, err := s.coll.UpdateOne(ctx, filter, update)
+	if err != nil {
+		return fmt.Errorf("ledger/mongodb: set annotations: %w", err)
+	}
+	if res.MatchedCount == 0 {
+		return ledger.ErrEntryNotFound
+	}
+	return nil
+}
+
+// Trim deletes entries from the named stream with IDs <= beforeID.
 func (s *Store) Trim(ctx context.Context, stream string, beforeID string) (int64, error) {
 	if s.closed.Load() {
 		return 0, ledger.ErrStoreClosed
@@ -285,7 +366,7 @@ func (s *Store) Trim(ctx context.Context, stream string, beforeID string) (int64
 	return res.DeletedCount, nil
 }
 
-// Health checks database connectivity by pinging the underlying connection.
+// Health checks database connectivity.
 func (s *Store) Health(ctx context.Context) error {
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
@@ -293,8 +374,7 @@ func (s *Store) Health(ctx context.Context) error {
 	return s.db.Client().Ping(ctx, nil)
 }
 
-// Close marks the store as closed. The caller is responsible for closing
-// the underlying *mongo.Client.
+// Close marks the store as closed.
 func (s *Store) Close(_ context.Context) error {
 	s.closed.Store(true)
 	return nil

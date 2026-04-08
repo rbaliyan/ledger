@@ -14,8 +14,11 @@ type Entry[I comparable, T any] struct {
 	OrderKey      string            // Ordering key.
 	DedupKey      string            // Deduplication key.
 	SchemaVersion int               // Schema version at write time (before upcasting).
-	Metadata      map[string]string // Arbitrary key-value metadata.
+	Metadata      map[string]string // Immutable key-value metadata (set at append).
+	Tags          []string          // Mutable tags (updated via SetTags).
+	Annotations   map[string]string // Mutable annotations (updated via SetAnnotations).
 	CreatedAt     time.Time         // Timestamp when the entry was stored.
+	UpdatedAt     *time.Time        // Timestamp of last tag/annotation update.
 }
 
 // AppendInput describes an entry to append to a stream.
@@ -23,7 +26,8 @@ type AppendInput[T any] struct {
 	Payload  T                 // Payload to encode and store.
 	OrderKey string            // Ordering key for filtering (e.g., aggregate ID).
 	DedupKey string            // Deduplication key. Empty means no dedup.
-	Metadata map[string]string // Arbitrary key-value metadata.
+	Metadata map[string]string // Immutable key-value metadata.
+	Tags     []string          // Initial tags (can be updated later via SetTags).
 }
 
 // options configures a Stream.
@@ -72,14 +76,6 @@ type Stream[I comparable, T any] struct {
 // NewStream creates a lightweight stream handle. The stream does not need to
 // exist in the store beforehand — it is created implicitly on first append.
 //
-// Schema versioning example:
-//
-//	s := ledger.NewStream[int64, OrderV2](store, "orders",
-//	    ledger.WithSchemaVersion(2),
-//	    ledger.WithUpcaster(ledger.NewFieldMapper(1, 2).
-//	        AddDefault("email", "unknown@example.com")),
-//	)
-//
 // Panics if store is nil.
 func NewStream[I comparable, T any](store Store[I], name string, opts ...Option) Stream[I, T] {
 	if store == nil {
@@ -123,6 +119,7 @@ func (s Stream[I, T]) Append(ctx context.Context, entries ...AppendInput[T]) ([]
 			DedupKey:      e.DedupKey,
 			SchemaVersion: s.schemaVersion,
 			Metadata:      e.Metadata,
+			Tags:          e.Tags,
 		}
 	}
 	return s.store.Append(ctx, s.name, raw...)
@@ -140,7 +137,6 @@ func (s Stream[I, T]) Read(ctx context.Context, opts ...ReadOption) ([]Entry[I, 
 	for i, se := range stored {
 		payload := se.Payload
 
-		// Upcast if the stored entry is from an older schema version.
 		if se.SchemaVersion > 0 && se.SchemaVersion < s.schemaVersion {
 			payload, err = upcastChain(ctx, payload, se.SchemaVersion, s.schemaVersion, s.upcasters)
 			if err != nil {
@@ -160,8 +156,21 @@ func (s Stream[I, T]) Read(ctx context.Context, opts ...ReadOption) ([]Entry[I, 
 			DedupKey:      se.DedupKey,
 			SchemaVersion: se.SchemaVersion,
 			Metadata:      se.Metadata,
+			Tags:          se.Tags,
+			Annotations:   se.Annotations,
 			CreatedAt:     se.CreatedAt,
+			UpdatedAt:     se.UpdatedAt,
 		}
 	}
 	return entries, nil
+}
+
+// SetTags replaces all tags on an entry in this stream.
+func (s Stream[I, T]) SetTags(ctx context.Context, id I, tags []string) error {
+	return s.store.SetTags(ctx, s.name, id, tags)
+}
+
+// SetAnnotations merges annotations into an entry in this stream.
+func (s Stream[I, T]) SetAnnotations(ctx context.Context, id I, annotations map[string]*string) error {
+	return s.store.SetAnnotations(ctx, s.name, id, annotations)
 }
