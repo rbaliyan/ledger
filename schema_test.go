@@ -198,6 +198,85 @@ func TestLimit_InvalidValues(t *testing.T) {
 	}
 }
 
+func TestOrderString(t *testing.T) {
+	if Ascending.String() != "ascending" {
+		t.Errorf("Ascending.String() = %q", Ascending.String())
+	}
+	if Descending.String() != "descending" {
+		t.Errorf("Descending.String() = %q", Descending.String())
+	}
+	if Order(99).String() != "ascending" {
+		t.Errorf("Order(99).String() = %q, want ascending (default)", Order(99).String())
+	}
+}
+
+func TestJSONCodecRoundTrip(t *testing.T) {
+	codec := JSONCodec{}
+
+	type payload struct {
+		Name string `json:"name"`
+		N    int    `json:"n"`
+	}
+
+	data, err := codec.Encode(payload{Name: "test", N: 42})
+	if err != nil {
+		t.Fatalf("Encode: %v", err)
+	}
+
+	var decoded payload
+	if err := codec.Decode(data, &decoded); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if decoded.Name != "test" || decoded.N != 42 {
+		t.Errorf("decoded = %+v", decoded)
+	}
+}
+
+func TestJSONCodecErrors(t *testing.T) {
+	codec := JSONCodec{}
+
+	// Encode error: channels can't be marshaled
+	_, err := codec.Encode(make(chan int))
+	if err == nil {
+		t.Error("Encode(chan) should error")
+	}
+
+	// Decode error: invalid JSON
+	var v any
+	if err := codec.Decode([]byte(`{invalid`), &v); err == nil {
+		t.Error("Decode(invalid) should error")
+	}
+}
+
+func TestNewStreamPanicsOnNilStore(t *testing.T) {
+	defer func() {
+		if r := recover(); r == nil {
+			t.Error("NewStream with nil store should panic")
+		}
+	}()
+	NewStream[int64, any](nil, "test")
+}
+
+func TestFieldMapper_NilPayload(t *testing.T) {
+	mapper := NewFieldMapper(1, 2).AddDefault("x", "y")
+	result, err := mapper.Upcast(context.Background(), []byte(`null`))
+	if err != nil {
+		t.Fatalf("Upcast null: %v", err)
+	}
+	// null payload returns unchanged
+	if string(result) != "null" {
+		t.Errorf("result = %s, want null", result)
+	}
+}
+
+func TestFieldMapper_InvalidJSON(t *testing.T) {
+	mapper := NewFieldMapper(1, 2)
+	_, err := mapper.Upcast(context.Background(), []byte(`{invalid`))
+	if err == nil {
+		t.Error("Upcast invalid JSON should error")
+	}
+}
+
 func TestValidateName(t *testing.T) {
 	valid := []string{"ledger_entries", "my_table", "_private", "T1"}
 	for _, name := range valid {

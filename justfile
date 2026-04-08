@@ -4,7 +4,7 @@ DOCKER := env("DOCKER", "docker")
 # MongoDB container settings
 MONGO_CONTAINER := "ledger-mongo-test"
 MONGO_PORT := "27020"
-MONGO_IMAGE := "mongo:6.0"
+MONGO_IMAGE := "mongo:7.0"
 
 # PostgreSQL container settings
 PG_CONTAINER := "ledger-postgres-test"

@@ -112,11 +112,13 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 
 	t.Run("CursorPagination", func(t *testing.T) {
 		for i := range 5 {
-			store.Append(ctx, "test-cursor", ledger.RawEntry{
+			if _, err := store.Append(ctx, "test-cursor", ledger.RawEntry{
 				Payload:       []byte(`{}`),
 				SchemaVersion: 1,
 				OrderKey:      string(rune('a' + i)),
-			})
+			}); err != nil {
+				t.Fatalf("append %d: %v", i, err)
+			}
 		}
 		page1, err := store.Read(ctx, "test-cursor", ledger.Limit(2))
 		if err != nil {
@@ -142,11 +144,13 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 	})
 
 	t.Run("Descending", func(t *testing.T) {
-		for range 3 {
-			store.Append(ctx, "test-desc", ledger.RawEntry{
+		for i := range 3 {
+			if _, err := store.Append(ctx, "test-desc", ledger.RawEntry{
 				Payload:       []byte(`{}`),
 				SchemaVersion: 1,
-			})
+			}); err != nil {
+				t.Fatalf("append %d: %v", i, err)
+			}
 		}
 		entries, err := store.Read(ctx, "test-desc", ledger.Desc())
 		if err != nil {
@@ -158,9 +162,11 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 	})
 
 	t.Run("OrderKeyFilter", func(t *testing.T) {
-		store.Append(ctx, "test-order", ledger.RawEntry{Payload: []byte(`{}`), OrderKey: "a", SchemaVersion: 1})
-		store.Append(ctx, "test-order", ledger.RawEntry{Payload: []byte(`{}`), OrderKey: "b", SchemaVersion: 1})
-		store.Append(ctx, "test-order", ledger.RawEntry{Payload: []byte(`{}`), OrderKey: "a", SchemaVersion: 1})
+		for _, key := range []string{"a", "b", "a"} {
+			if _, err := store.Append(ctx, "test-order", ledger.RawEntry{Payload: []byte(`{}`), OrderKey: key, SchemaVersion: 1}); err != nil {
+				t.Fatalf("append: %v", err)
+			}
+		}
 
 		entries, err := store.Read(ctx, "test-order", ledger.WithOrderKey("a"))
 		if err != nil {

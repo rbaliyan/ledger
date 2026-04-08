@@ -17,3 +17,6 @@ linters:
         - (*os.File).Close
         - (net.Conn).Close
         - (*database/sql.Tx).Rollback
+        - (*database/sql.Rows).Close
+        - (*database/sql.Stmt).Close
+        - (go.mongodb.org/mongo-driver/v2/mongo.Cursor).Close
