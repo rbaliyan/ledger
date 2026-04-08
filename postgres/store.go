@@ -5,6 +5,9 @@
 //
 // The caller is responsible for opening and closing the *sql.DB.
 // Import a PostgreSQL driver (e.g., github.com/lib/pq) in your application.
+//
+// Transaction support: pass a *sql.Tx via [ledger.WithTx] to have the store
+// participate in an external transaction instead of creating its own.
 package postgres
 
 import (
@@ -19,6 +22,14 @@ import (
 
 	"github.com/rbaliyan/ledger"
 )
+
+// sqlExecutor is the common interface between *sql.DB and *sql.Tx.
+type sqlExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+	PrepareContext(ctx context.Context, query string) (*sql.Stmt, error)
+}
 
 var (
 	_ ledger.Store[int64]  = (*Store)(nil)
@@ -104,7 +115,19 @@ func (s *Store) createTable(ctx context.Context) error {
 	return err
 }
 
+// executor returns the *sql.Tx from context if present, otherwise s.db.
+func (s *Store) executor(ctx context.Context) sqlExecutor {
+	if tx, ok := ledger.TxFromContext(ctx).(*sql.Tx); ok {
+		return tx
+	}
+	return s.db
+}
+
 // Append adds entries to the named stream. Returns IDs of newly appended entries.
+//
+// If the context carries a *sql.Tx via [ledger.WithTx], the store uses that
+// transaction instead of creating its own. The caller is responsible for
+// committing or rolling back the transaction.
 func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.RawEntry) ([]int64, error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
@@ -113,11 +136,18 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		return nil, nil
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, fmt.Errorf("ledger/postgres: begin tx: %w", err)
+	exec := s.executor(ctx)
+
+	var ownTx *sql.Tx
+	if _, isExternalTx := exec.(*sql.Tx); !isExternalTx {
+		var err error
+		ownTx, err = s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return nil, fmt.Errorf("ledger/postgres: begin tx: %w", err)
+		}
+		defer ownTx.Rollback() //nolint:errcheck
+		exec = ownTx
 	}
-	defer tx.Rollback() //nolint:errcheck
 
 	query := fmt.Sprintf(
 		`INSERT INTO %s (stream, payload, order_key, dedup_key, schema_version, metadata)
@@ -126,7 +156,7 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		 RETURNING id`,
 		s.table,
 	)
-	stmt, err := tx.PrepareContext(ctx, query)
+	stmt, err := exec.PrepareContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("ledger/postgres: prepare: %w", err)
 	}
@@ -151,18 +181,24 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		ids = append(ids, id)
 	}
 
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("ledger/postgres: commit: %w", err)
+	if ownTx != nil {
+		if err := ownTx.Commit(); err != nil {
+			return nil, fmt.Errorf("ledger/postgres: commit: %w", err)
+		}
 	}
 	return ids, nil
 }
 
 // Read returns entries from the named stream.
+//
+// If the context carries a *sql.Tx via [ledger.WithTx], reads use that
+// transaction for read-your-writes consistency.
 func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[int64], error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
 	}
 
+	exec := s.executor(ctx)
 	o := ledger.ApplyReadOptions(opts...)
 
 	var (
@@ -207,7 +243,7 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 	)
 	args = append(args, o.Limit())
 
-	rows, err := s.db.QueryContext(ctx, query, args...)
+	rows, err := exec.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("ledger/postgres: query: %w", err)
 	}
@@ -242,9 +278,10 @@ func (s *Store) Count(ctx context.Context, stream string) (int64, error) {
 	if s.closed.Load() {
 		return 0, ledger.ErrStoreClosed
 	}
+	exec := s.executor(ctx)
 	query := fmt.Sprintf(`SELECT COUNT(*) FROM %s WHERE stream = $1`, s.table)
 	var count int64
-	if err := s.db.QueryRowContext(ctx, query, stream).Scan(&count); err != nil {
+	if err := exec.QueryRowContext(ctx, query, stream).Scan(&count); err != nil {
 		return 0, fmt.Errorf("ledger/postgres: count: %w", err)
 	}
 	return count, nil
@@ -255,8 +292,9 @@ func (s *Store) Trim(ctx context.Context, stream string, beforeID int64) (int64,
 	if s.closed.Load() {
 		return 0, ledger.ErrStoreClosed
 	}
+	exec := s.executor(ctx)
 	query := fmt.Sprintf(`DELETE FROM %s WHERE stream = $1 AND id <= $2`, s.table)
-	res, err := s.db.ExecContext(ctx, query, stream, beforeID)
+	res, err := exec.ExecContext(ctx, query, stream, beforeID)
 	if err != nil {
 		return 0, fmt.Errorf("ledger/postgres: trim: %w", err)
 	}

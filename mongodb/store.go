@@ -8,6 +8,10 @@
 // Append semantics: Uses InsertMany with ordered:false. If a non-dedup error
 // occurs, partial inserts may be committed. SQL backends use transactions for
 // atomic batch inserts.
+//
+// Transaction support: pass a mongo.Session via [ledger.WithTx] to have
+// operations participate in an external MongoDB transaction. The session must
+// already have an active transaction started by the caller.
 package mongodb
 
 import (
@@ -107,8 +111,21 @@ func (s *Store) ensureIndexes(ctx context.Context) error {
 	return err
 }
 
+// sessionCtx returns a context bound to a *mongo.Session from ledger.WithTx, if present.
+// MongoDB operations automatically use the session when the context carries one.
+func (s *Store) sessionCtx(ctx context.Context) context.Context {
+	if sess, ok := ledger.TxFromContext(ctx).(*mongo.Session); ok {
+		return mongo.NewSessionContext(ctx, sess)
+	}
+	return ctx
+}
+
 // Append adds entries to the named stream. Returns IDs (hex-encoded ObjectIDs) of newly appended entries.
 // Entries with duplicate dedup keys are silently skipped.
+//
+// If the context carries a mongo.Session via [ledger.WithTx], the store uses
+// that session's transaction. The caller is responsible for committing or
+// aborting the transaction.
 func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.RawEntry) ([]string, error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
@@ -117,6 +134,7 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		return nil, nil
 	}
 
+	ctx = s.sessionCtx(ctx)
 	now := time.Now().UTC()
 	docs := make([]entry, len(entries))
 	for i, e := range entries {
@@ -161,11 +179,15 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 }
 
 // Read returns entries from the named stream.
+//
+// If the context carries a *mongo.Session via [ledger.WithTx], reads use
+// that session for read-your-writes consistency.
 func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[string], error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
 	}
 
+	ctx = s.sessionCtx(ctx)
 	o := ledger.ApplyReadOptions(opts...)
 
 	filter := bson.D{{Key: "stream", Value: stream}}
@@ -234,6 +256,7 @@ func (s *Store) Count(ctx context.Context, stream string) (int64, error) {
 	if s.closed.Load() {
 		return 0, ledger.ErrStoreClosed
 	}
+	ctx = s.sessionCtx(ctx)
 	n, err := s.coll.CountDocuments(ctx, bson.D{{Key: "stream", Value: stream}})
 	if err != nil {
 		return 0, fmt.Errorf("ledger/mongodb: count: %w", err)
@@ -247,6 +270,7 @@ func (s *Store) Trim(ctx context.Context, stream string, beforeID string) (int64
 	if s.closed.Load() {
 		return 0, ledger.ErrStoreClosed
 	}
+	ctx = s.sessionCtx(ctx)
 	oid, err := bson.ObjectIDFromHex(beforeID)
 	if err != nil {
 		return 0, fmt.Errorf("ledger/mongodb: invalid trim cursor: %w", err)

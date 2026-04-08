@@ -189,3 +189,93 @@ func TestStreamSchemaUpcast(t *testing.T) {
 		t.Errorf("SchemaVersion = %d, want 1 (original)", e.SchemaVersion)
 	}
 }
+
+func TestWithTx_Commit(t *testing.T) {
+	db := openTestDB(t)
+	store, err := sqlite.New(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(context.Background())
+
+	ctx := context.Background()
+
+	// Begin external tx, append via ledger, commit — entry should persist.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txCtx := ledger.WithTx(ctx, tx)
+
+	ids, err := store.Append(txCtx, "tx-test", ledger.RawEntry{
+		Payload:       []byte(`{"txn":"commit"}`),
+		SchemaVersion: 1,
+	})
+	if err != nil {
+		t.Fatalf("Append in tx: %v", err)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("got %d ids, want 1", len(ids))
+	}
+
+	// Read within same tx — should see uncommitted entry.
+	entries, err := store.Read(txCtx, "tx-test")
+	if err != nil {
+		t.Fatalf("Read in tx: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("Read in tx: got %d entries, want 1", len(entries))
+	}
+
+	if err := tx.Commit(); err != nil {
+		t.Fatalf("Commit: %v", err)
+	}
+
+	// Read outside tx — should still see entry.
+	entries, err = store.Read(ctx, "tx-test")
+	if err != nil {
+		t.Fatalf("Read after commit: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Errorf("Read after commit: got %d entries, want 1", len(entries))
+	}
+}
+
+func TestWithTx_Rollback(t *testing.T) {
+	db := openTestDB(t)
+	store, err := sqlite.New(context.Background(), db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close(context.Background())
+
+	ctx := context.Background()
+
+	// Begin external tx, append via ledger, rollback — entry should not persist.
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	txCtx := ledger.WithTx(ctx, tx)
+
+	_, err = store.Append(txCtx, "tx-rollback", ledger.RawEntry{
+		Payload:       []byte(`{"txn":"rollback"}`),
+		SchemaVersion: 1,
+	})
+	if err != nil {
+		t.Fatalf("Append in tx: %v", err)
+	}
+
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("Rollback: %v", err)
+	}
+
+	// Read outside tx — should see nothing.
+	entries, err := store.Read(ctx, "tx-rollback")
+	if err != nil {
+		t.Fatalf("Read after rollback: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Errorf("Read after rollback: got %d entries, want 0", len(entries))
+	}
+}
