@@ -290,7 +290,7 @@ func (s *Store) SetTags(ctx context.Context, stream string, id string, tags []st
 	ctx = s.sessionCtx(ctx)
 	oid, err := bson.ObjectIDFromHex(id)
 	if err != nil {
-		return fmt.Errorf("ledger/mongodb: invalid id: %w", err)
+		return ledger.ErrEntryNotFound
 	}
 	now := time.Now().UTC()
 	res, err := s.coll.UpdateOne(ctx,
@@ -314,7 +314,7 @@ func (s *Store) SetAnnotations(ctx context.Context, stream string, id string, an
 	ctx = s.sessionCtx(ctx)
 	oid, err := bson.ObjectIDFromHex(id)
 	if err != nil {
-		return fmt.Errorf("ledger/mongodb: invalid id: %w", err)
+		return ledger.ErrEntryNotFound
 	}
 
 	setFields := bson.D{}
