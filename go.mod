@@ -1,6 +1,6 @@
 module github.com/rbaliyan/ledger
 
-go 1.25.8
+go 1.25.9
 
 require (
 	github.com/lib/pq v1.12.3
