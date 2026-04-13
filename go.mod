@@ -3,12 +3,14 @@ module github.com/rbaliyan/ledger
 go 1.25.9
 
 require (
+	github.com/AdamKorcz/go-118-fuzz-build v0.0.0-20250520111509-a70c2aa677fa
 	github.com/lib/pq v1.12.3
 	go.mongodb.org/mongo-driver/v2 v2.5.0
 	modernc.org/sqlite v1.48.1
 )
 
 require (
+	github.com/AdaLogics/go-fuzz-headers v0.0.0-20230811130428-ced1acdcaa24 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/klauspost/compress v1.17.6 // indirect
