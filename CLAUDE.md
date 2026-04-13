@@ -8,6 +8,12 @@ Append-only log library for Go with typed generic entries, schema versioning, de
 
 ## Architecture
 
+### Store = type, Stream = instance
+
+- A **Store** represents one entity type — one table (SQL) or collection (Mongo). The table/collection name IS the type. Open one Store per type (e.g., `orders`, `users`) against the same database.
+- A **Stream** is one instance within a type, identified by a string stream ID (e.g., `"user-123"`). Streams are implicit — created on first append, no lifecycle. `ListStreamIDs` enumerates the streams of a type.
+- Cross-type queries are deliberately out of scope: they violate the "store = type" invariant. Users who need to correlate across types iterate one store at a time.
+
 ### Two-Level Generic Design
 
 - **`Store[I comparable]`** (`store.go`): Backend interface, generic over ID type (int64 for SQL, string for MongoDB). Handles raw bytes.
@@ -17,11 +23,12 @@ Append-only log library for Go with typed generic entries, schema versioning, de
 
 ```
 ledger/
-├── store.go          # Store interface, RawEntry, StoredEntry, ReadOptions, HealthChecker
+├── store.go          # Store interface, RawEntry, StoredEntry, ReadOptions, ListOptions, HealthChecker
 ├── stream.go         # Stream[I,T], Entry, AppendInput, options
 ├── codec.go          # Codec interface, JSONCodec
 ├── schema.go         # Upcaster interface, FieldMapper, UpcasterFunc, upcastChain
 ├── errors.go         # Sentinel errors
+├── tx.go             # WithTx, TxFromContext — context-based external transactions
 ├── validate.go       # ValidateName for table/collection names
 ├── storetest/        # Backend-agnostic conformance test suite
 │   └── storetest.go  # RunStoreTests[I](t, store, afterFn)
@@ -55,6 +62,14 @@ ledger/
 - `Limit(n)` — max entries (default 100)
 - `Desc()` — newest first
 - `WithOrderKey(key)` — filter by ordering key
+- `WithTag(tag)` / `WithAllTags(tags...)` — tag filters
+
+### List Options (for `ListStreamIDs`)
+
+- `ListAfter(streamID)` — cursor; returns IDs strictly greater
+- `ListLimit(n)` — max IDs per page (default 100)
+
+Note: `ListOption` is deliberately separate from `ReadOption` so the `ListAfter(string)` cursor can't be confused with `After[I](I)` (entry ID cursor).
 
 ### Store Interface
 
@@ -63,10 +78,15 @@ type Store[I comparable] interface {
     Append(ctx, stream, ...RawEntry) ([]I, error)
     Read(ctx, stream, ...ReadOption) ([]StoredEntry[I], error)
     Count(ctx, stream) (int64, error)
+    SetTags(ctx, stream, id, tags) error
+    SetAnnotations(ctx, stream, id, annotations) error
     Trim(ctx, stream, beforeID) (int64, error)
+    ListStreamIDs(ctx, ...ListOption) ([]string, error)  // distinct stream IDs with ≥1 entry
     Close(ctx) error
 }
 ```
+
+Each backend's concrete `*Store` also exposes `Type() string` returning its table/collection name (not on the interface — for logging/tracing).
 
 ### Optional Interfaces
 
@@ -99,7 +119,7 @@ MONGO_URI=mongodb://localhost:27020/?directConnection=true
 
 ## Error Handling
 
-- Sentinel errors checked with `errors.Is()`: `ErrStoreClosed`, `ErrEncode`, `ErrDecode`, `ErrNoUpcaster`, `ErrInvalidCursor`, `ErrInvalidName`
+- Sentinel errors checked with `errors.Is()`: `ErrStoreClosed`, `ErrEncode`, `ErrDecode`, `ErrNoUpcaster`, `ErrInvalidCursor`, `ErrInvalidName`, `ErrEntryNotFound`
 - Backend errors wrapped with context: `fmt.Errorf("ledger/sqlite: ...: %w", err)`
 
 ## Code Style

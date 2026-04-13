@@ -32,6 +32,10 @@ func (mockStore) SetAnnotations(_ context.Context, _ string, _ int64, _ map[stri
 
 func (mockStore) Trim(_ context.Context, _ string, _ int64) (int64, error) { return 0, nil }
 
+func (mockStore) ListStreamIDs(_ context.Context, _ ...ledger.ListOption) ([]string, error) {
+	return nil, nil
+}
+
 func (mockStore) Close(_ context.Context) error { return nil }
 
 func ExampleNewStream() {
@@ -42,8 +46,9 @@ func ExampleNewStream() {
 		Amount float64 `json:"amount"`
 	}
 
-	// Create a lightweight stream — cheap to create and discard.
-	s := ledger.NewStream[int64, Order](store, "orders")
+	// The store represents the "orders" type (one table/collection).
+	// The stream is one instance within that type, identified by a stream ID.
+	s := ledger.NewStream[int64, Order](store, "user-123")
 
 	ids, err := s.Append(context.Background(), ledger.AppendInput[Order]{
 		Payload:  Order{ID: "o-1", Amount: 99.99},
@@ -67,13 +72,26 @@ func ExampleNewStream_schemaVersioning() {
 	}
 
 	// Create a v2 stream with upcaster from v1
-	s := ledger.NewStream[int64, OrderV2](store, "orders",
+	s := ledger.NewStream[int64, OrderV2](store, "user-123",
 		ledger.WithSchemaVersion(2),
 		ledger.WithUpcaster(ledger.NewFieldMapper(1, 2).
 			RenameField("customer_name", "name").
 			AddDefault("email", "unknown@example.com")),
 	)
 
-	fmt.Println("stream:", s.Name(), "schema version:", s.SchemaVersion())
-	// Output: stream: orders schema version: 2
+	fmt.Println("stream:", s.ID(), "schema version:", s.SchemaVersion())
+	// Output: stream: user-123 schema version: 2
+}
+
+func ExampleStore_listStreamIDs() {
+	// A Store represents one entity type. Open one per type.
+	//
+	// For this example, mockStore.ListStreamIDs returns nil, but with a real
+	// backend it would return every stream ID with at least one entry, letting
+	// you enumerate all instances of the type.
+	orders := mockStore{}
+
+	ids, _ := orders.ListStreamIDs(context.Background())
+	fmt.Println("stream count:", len(ids))
+	// Output: stream count: 0
 }

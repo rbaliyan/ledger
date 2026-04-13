@@ -5,6 +5,7 @@ package storetest
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/rbaliyan/ledger"
@@ -402,6 +403,113 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 		}
 	})
 
+	// Stream-name prefix chosen so these streams sort after all other test streams
+	// in this suite, allowing ListStreamIDs tests to isolate their results via cursor.
+	const listPrefix = "zzz-list-"
+
+	t.Run("ListStreamIDs", func(t *testing.T) {
+		names := []string{listPrefix + "alpha", listPrefix + "beta", listPrefix + "gamma"}
+		for _, name := range names {
+			if _, err := store.Append(ctx, name, ledger.RawEntry{Payload: []byte(`{}`), SchemaVersion: 1}); err != nil {
+				t.Fatalf("append %s: %v", name, err)
+			}
+		}
+
+		ids, err := store.ListStreamIDs(ctx, ledger.ListAfter(listPrefix))
+		if err != nil {
+			t.Fatalf("ListStreamIDs: %v", err)
+		}
+
+		got := make(map[string]bool, len(ids))
+		for _, id := range ids {
+			got[id] = true
+		}
+		for _, want := range names {
+			if !got[want] {
+				t.Errorf("missing %q in %v", want, ids)
+			}
+		}
+
+		// Verify ascending order.
+		for i := 1; i < len(ids); i++ {
+			if ids[i-1] >= ids[i] {
+				t.Errorf("not ascending at %d: %v", i, ids)
+			}
+		}
+	})
+
+	t.Run("ListStreamIDs_Pagination", func(t *testing.T) {
+		const pagePrefix = "zzz-page-"
+		names := []string{pagePrefix + "a", pagePrefix + "b", pagePrefix + "c", pagePrefix + "d", pagePrefix + "e"}
+		for _, name := range names {
+			if _, err := store.Append(ctx, name, ledger.RawEntry{Payload: []byte(`{}`), SchemaVersion: 1}); err != nil {
+				t.Fatalf("append %s: %v", name, err)
+			}
+		}
+
+		page1, err := store.ListStreamIDs(ctx, ledger.ListAfter(pagePrefix), ledger.ListLimit(2))
+		if err != nil {
+			t.Fatalf("page1: %v", err)
+		}
+		if len(page1) != 2 || page1[0] != pagePrefix+"a" || page1[1] != pagePrefix+"b" {
+			t.Fatalf("page1 = %v, want [%sa %sb]", page1, pagePrefix, pagePrefix)
+		}
+
+		page2, err := store.ListStreamIDs(ctx, ledger.ListAfter(page1[1]), ledger.ListLimit(2))
+		if err != nil {
+			t.Fatalf("page2: %v", err)
+		}
+		if len(page2) != 2 || page2[0] != pagePrefix+"c" || page2[1] != pagePrefix+"d" {
+			t.Fatalf("page2 = %v", page2)
+		}
+
+		page3, err := store.ListStreamIDs(ctx, ledger.ListAfter(page2[1]), ledger.ListLimit(2))
+		if err != nil {
+			t.Fatalf("page3: %v", err)
+		}
+		if len(page3) < 1 || page3[0] != pagePrefix+"e" {
+			t.Fatalf("page3 = %v, want first element %se", page3, pagePrefix)
+		}
+	})
+
+	t.Run("ListStreamIDs_TrimmedExcluded", func(t *testing.T) {
+		const name = "zzz-trimmed-out"
+		ids, err := store.Append(ctx, name, ledger.RawEntry{Payload: []byte(`{}`), SchemaVersion: 1})
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		if len(ids) != 1 {
+			t.Fatalf("append ids = %v", ids)
+		}
+
+		// Present before trim.
+		listed, _ := store.ListStreamIDs(ctx, ledger.ListAfter("zzz-trimmed"))
+		if !slices.Contains(listed, name) {
+			t.Fatalf("stream %q not listed before trim: %v", name, listed)
+		}
+
+		if _, err := store.Trim(ctx, name, ids[0]); err != nil {
+			t.Fatalf("Trim: %v", err)
+		}
+
+		// Absent after trim-to-empty.
+		listed, _ = store.ListStreamIDs(ctx, ledger.ListAfter("zzz-trimmed"))
+		if slices.Contains(listed, name) {
+			t.Errorf("stream %q still listed after full trim: %v", name, listed)
+		}
+	})
+
+	t.Run("ListStreamIDs_EmptyAfterCursor", func(t *testing.T) {
+		// Cursor beyond any plausible stream name — should return empty.
+		ids, err := store.ListStreamIDs(ctx, ledger.ListAfter("zzzzzzzzzzzzzzz"))
+		if err != nil {
+			t.Fatalf("ListStreamIDs: %v", err)
+		}
+		if ids != nil {
+			t.Errorf("want nil past end-of-range, got %v", ids)
+		}
+	})
+
 	t.Run("ClosedStoreErrors", func(t *testing.T) {
 		// Test with a separate store is too complex for a generic suite.
 		// Backend-specific tests cover this. Verify the error type exists.
@@ -410,3 +518,4 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 		}
 	})
 }
+

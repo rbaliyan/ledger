@@ -23,6 +23,10 @@ import (
 // Store is the backend storage interface for append-only log entries.
 // I is the ID type used for cursor-based iteration (e.g., int64 for SQL, string for MongoDB).
 //
+// A Store represents a single entity type — one table or collection. The stream
+// parameter on each method identifies an instance within that type (e.g., a
+// store created with table "orders" may contain streams "user-123", "user-456").
+//
 // Append semantics: SQL backends (sqlite, postgres) use transactions for atomic
 // batch inserts. The MongoDB backend uses InsertMany with ordered:false, meaning
 // partial success is possible on non-dedup errors.
@@ -53,6 +57,14 @@ type Store[I comparable] interface {
 	// Trim deletes entries from the named stream with IDs less than or equal to beforeID.
 	// Returns the number of entries deleted.
 	Trim(ctx context.Context, stream string, beforeID I) (int64, error)
+
+	// ListStreamIDs returns distinct stream IDs that have at least one entry in
+	// this store. Results are ordered ascending by stream ID and cursor-paginated
+	// via [ListAfter] and [ListLimit]. Returns nil, nil for an empty store.
+	//
+	// A stream that has been fully trimmed is not returned (no separate stream
+	// registry is maintained).
+	ListStreamIDs(ctx context.Context, opts ...ListOption) ([]string, error)
 
 	// Close releases resources held by the store. The caller is responsible for
 	// closing the underlying database connection.
@@ -205,4 +217,54 @@ func WithTag(tag string) ReadOption {
 // WithAllTags returns a ReadOption that filters entries having ALL specified tags.
 func WithAllTags(tags ...string) ReadOption {
 	return func(o *ReadOptions) { o.allTags = tags }
+}
+
+// ListOptions holds the parsed list parameters.
+// This type is intended for Store implementors.
+type ListOptions struct {
+	after string
+	limit int
+}
+
+// Limit returns the maximum number of stream IDs to return.
+func (o ListOptions) Limit() int { return o.limit }
+
+// After returns the cursor value. Only stream IDs strictly greater than this
+// value are returned. Empty string means no cursor.
+func (o ListOptions) After() string { return o.after }
+
+// HasAfter reports whether a cursor was set.
+func (o ListOptions) HasAfter() bool { return o.after != "" }
+
+func defaultListOptions() ListOptions {
+	return ListOptions{limit: 100}
+}
+
+// ApplyListOptions applies the given options and returns the resolved ListOptions.
+// This function is intended for Store implementors.
+func ApplyListOptions(opts ...ListOption) ListOptions {
+	o := defaultListOptions()
+	for _, fn := range opts {
+		fn(&o)
+	}
+	return o
+}
+
+// ListOption configures how stream IDs are listed by [Store.ListStreamIDs].
+type ListOption func(*ListOptions)
+
+// ListLimit returns a ListOption that sets the maximum number of stream IDs to return.
+// The default limit is 100.
+func ListLimit(n int) ListOption {
+	return func(o *ListOptions) {
+		if n > 0 {
+			o.limit = n
+		}
+	}
+}
+
+// ListAfter returns a ListOption that sets the cursor position.
+// Only stream IDs strictly greater than this value are returned.
+func ListAfter(streamID string) ListOption {
+	return func(o *ListOptions) { o.after = streamID }
 }

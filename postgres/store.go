@@ -106,6 +106,9 @@ func (s *Store) createTable(ctx context.Context) error {
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_%s_stream_id ON %s(stream, id)`, s.table, s.table),
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_%s_stream_order ON %s(stream, order_key, id)`, s.table, s.table),
 		fmt.Sprintf(`CREATE UNIQUE INDEX IF NOT EXISTS idx_%s_dedup ON %s(stream, dedup_key) WHERE dedup_key != ''`, s.table, s.table),
+		// Single-column stream index supports efficient DISTINCT scans for ListStreamIDs;
+		// cheap to maintain due to low cardinality of stream values.
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_%s_stream ON %s(stream)`, s.table, s.table),
 	} {
 		if _, err := s.db.ExecContext(ctx, idx); err != nil {
 			return err
@@ -370,6 +373,43 @@ func (s *Store) SetAnnotations(ctx context.Context, stream string, id int64, ann
 	}
 	return nil
 }
+
+// ListStreamIDs returns distinct stream IDs with at least one entry in this store.
+// Results are ascending by stream ID and cursor-paginated via ListAfter/ListLimit.
+func (s *Store) ListStreamIDs(ctx context.Context, opts ...ledger.ListOption) ([]string, error) {
+	if s.closed.Load() {
+		return nil, ledger.ErrStoreClosed
+	}
+	o := ledger.ApplyListOptions(opts...)
+	exec := s.executor(ctx)
+
+	query := fmt.Sprintf(
+		`SELECT DISTINCT stream FROM %s WHERE stream > $1 ORDER BY stream ASC LIMIT $2`,
+		s.table,
+	)
+	rows, err := exec.QueryContext(ctx, query, o.After(), o.Limit())
+	if err != nil {
+		return nil, fmt.Errorf("ledger/postgres: list stream ids: %w", err)
+	}
+	defer rows.Close()
+
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("ledger/postgres: scan stream id: %w", err)
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ledger/postgres: list stream ids iteration: %w", err)
+	}
+	return ids, nil
+}
+
+// Type returns the table name this store is bound to, which represents the
+// entity type for all streams in this store. Intended for logging/tracing.
+func (s *Store) Type() string { return s.table }
 
 // Trim deletes entries from the named stream with IDs <= beforeID.
 func (s *Store) Trim(ctx context.Context, stream string, beforeID int64) (int64, error) {
