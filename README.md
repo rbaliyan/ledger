@@ -9,15 +9,26 @@
 
 Append-only log library for Go with typed generic entries, schema versioning, and pluggable storage backends.
 
+## Model
+
+A **Store** represents one entity type — one table or collection. Create it with a name describing the type (e.g., `"orders"`, `"audit_events"`). All streams in that store share the same schema and codec.
+
+A **Stream** is an instance within a type. Create it with a stream ID (e.g., `"user-123"`, `"org-456"`). Streams are implicit — they're created on first append and require no setup.
+
+Use `store.ListStreamIDs(ctx)` to enumerate all streams of the type.
+
 ## Features
 
 - **Generic typed streams** — `Stream[I, T]` provides compile-time type safety for entry payloads
 - **Lightweight streams** — create per operation and discard, no lifecycle management
+- **Stream discovery** — `ListStreamIDs` enumerates all streams in a store
 - **Schema versioning** — entries are stamped with a version; upcasters transform old entries on read
 - **Deduplication** — storage-level dedup via partial unique indexes, silently skips duplicates
 - **Ordering keys** — filter entries by an ordering key (e.g., aggregate ID)
+- **Mutable tags & annotations** — update labels and key-value state on existing entries; filter reads by tag
 - **Cursor-based pagination** — efficient reads with `After(id)`, `Limit(n)`, `Desc()`
 - **Retention management** — `Trim(ctx, stream, beforeID)` for log compaction
+- **External transactions** — participate in a caller-managed `*sql.Tx` or `mongo.Session` via `WithTx(ctx, tx)`
 - **Health checks** — all backends implement `HealthChecker` interface
 - **Structured logging** — all backends log via `slog.Default()`; override with `WithLogger()`
 - **Three backends** — SQLite, PostgreSQL, MongoDB
@@ -51,13 +62,15 @@ type Order struct {
 func main() {
     ctx := context.Background()
 
-    // Open a store (once, shared across your application)
+    // Open the database once.
     db, _ := sql.Open("sqlite", "app.db")
-    store, _ := sqlite.New(ctx, db)
-    defer store.Close(ctx)
 
-    // Create a lightweight stream (per operation, then discard)
-    s := ledger.NewStream[int64, Order](store, "orders")
+    // Open one store per entity type. The table name IS the type.
+    orders, _ := sqlite.New(ctx, db, sqlite.WithTable("orders"))
+    defer orders.Close(ctx)
+
+    // Create a lightweight stream for one instance ("user-123") of the orders type.
+    s := ledger.NewStream[int64, Order](orders, "user-123")
 
     // Append entries with ordering key, dedup key, and metadata
     ids, _ := s.Append(ctx, ledger.AppendInput[Order]{
@@ -80,7 +93,28 @@ func main() {
     // Filter by ordering key
     byCustomer, _ := s.Read(ctx, ledger.WithOrderKey("customer-123"))
     _ = byCustomer
+
+    // Enumerate every order stream in this store.
+    streamIDs, _ := orders.ListStreamIDs(ctx)
+    for _, id := range streamIDs {
+        // Load each stream and process.
+        _ = ledger.NewStream[int64, Order](orders, id)
+    }
 }
+```
+
+### Multiple types
+
+Each type is a separate store, typically backed by a separate table or collection:
+
+```go
+orders, _ := sqlite.New(ctx, db, sqlite.WithTable("orders"))
+users,  _ := sqlite.New(ctx, db, sqlite.WithTable("users"))
+
+// Streams within a store are independent of streams in other stores —
+// `"alice"` under `orders` and `"alice"` under `users` are separate.
+ordStream  := ledger.NewStream[int64, Order](orders, "alice")
+userStream := ledger.NewStream[int64, User](users,  "alice")
 ```
 
 ## Schema Versioning
@@ -161,7 +195,10 @@ type Store[I comparable] interface {
     Append(ctx context.Context, stream string, entries ...RawEntry) ([]I, error)
     Read(ctx context.Context, stream string, opts ...ReadOption) ([]StoredEntry[I], error)
     Count(ctx context.Context, stream string) (int64, error)
+    SetTags(ctx context.Context, stream string, id I, tags []string) error
+    SetAnnotations(ctx context.Context, stream string, id I, ann map[string]*string) error
     Trim(ctx context.Context, stream string, beforeID I) (int64, error)
+    ListStreamIDs(ctx context.Context, opts ...ListOption) ([]string, error)
     Close(ctx context.Context) error
 }
 ```
@@ -176,7 +213,7 @@ Entries with a non-empty `DedupKey` are subject to per-stream dedup via a partia
 
 ## Metadata
 
-Attach arbitrary key-value metadata to entries:
+Attach arbitrary **immutable** key-value metadata at append time:
 
 ```go
 s.Append(ctx, ledger.AppendInput[Order]{
@@ -185,7 +222,67 @@ s.Append(ctx, ledger.AppendInput[Order]{
 })
 ```
 
-Metadata is stored as JSON (SQL backends) or a BSON subdocument (MongoDB).
+Metadata is stored as JSON (SQL backends) or a BSON subdocument (MongoDB) and never changes after append.
+
+## Tags and Annotations
+
+Entries have two **mutable** fields that can be updated after append:
+
+- **Tags** `[]string` — ordered labels for categorization and filtering (e.g., `"processed"`, `"archived"`).
+- **Annotations** `map[string]string` — key-value state separate from immutable `Metadata` (e.g., `"processed_at"`, `"error"`).
+
+```go
+// Initial tags can be set at append time.
+ids, _ := s.Append(ctx, ledger.AppendInput[Order]{
+    Payload: order,
+    Tags:    []string{"pending"},
+})
+id := ids[0]
+
+// Replace tags on an existing entry.
+store.SetTags(ctx, "user-123", id, []string{"processed", "reviewed"})
+
+// Merge annotations. A nil value deletes that key.
+v := "2026-04-13"
+store.SetAnnotations(ctx, "user-123", id, map[string]*string{
+    "processed_at": &v,
+    "error":        nil,
+})
+```
+
+Filter reads by tag:
+
+```go
+// Entries carrying this tag:
+entries, _ := s.Read(ctx, ledger.WithTag("processed"))
+
+// Entries carrying ALL of these tags:
+entries, _ = s.Read(ctx, ledger.WithAllTags("processed", "audited"))
+```
+
+`SetTags` and `SetAnnotations` return `ErrEntryNotFound` when the entry doesn't exist in the stream.
+
+## Transactions
+
+Participate in a caller-managed transaction by attaching it to the context. Store methods invoked with that context use the caller's transaction instead of creating their own:
+
+```go
+// SQL (sqlite, postgres)
+tx, _ := db.BeginTx(ctx, nil)
+ctx = ledger.WithTx(ctx, tx)
+store.Append(ctx, "user-123", entry) // participates in tx
+tx.Commit()
+
+// MongoDB
+sess, _ := client.StartSession()
+sess.WithTransaction(ctx, func(sc context.Context) (any, error) {
+    ctx := ledger.WithTx(sc, sess)
+    _, err := store.Append(ctx, "user-123", entry)
+    return nil, err
+})
+```
+
+Without `WithTx`, SQL backends open their own transaction per batch `Append`; MongoDB uses `InsertMany` with `ordered:false` (see Atomicity note above).
 
 ## Custom Backends
 

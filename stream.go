@@ -62,11 +62,14 @@ func WithUpcaster(u Upcaster) Option {
 	return func(o *options) { o.upcasters = append(o.upcasters, u) }
 }
 
-// Stream is a lightweight, typed handle to a named stream in a store.
+// Stream is a lightweight, typed handle to a stream instance within a store.
+// The Store represents the entity type (table/collection); the Stream's id
+// identifies the particular instance within that type.
+//
 // It is cheap to create — create one per operation and discard it.
 // Stream is safe for concurrent use.
 type Stream[I comparable, T any] struct {
-	name          string
+	id            string
 	store         Store[I]
 	codec         Codec
 	schemaVersion int
@@ -75,9 +78,10 @@ type Stream[I comparable, T any] struct {
 
 // NewStream creates a lightweight stream handle. The stream does not need to
 // exist in the store beforehand — it is created implicitly on first append.
+// The id identifies the stream instance within the store's type.
 //
 // Panics if store is nil.
-func NewStream[I comparable, T any](store Store[I], name string, opts ...Option) Stream[I, T] {
+func NewStream[I comparable, T any](store Store[I], id string, opts ...Option) Stream[I, T] {
 	if store == nil {
 		panic("ledger: NewStream called with nil store")
 	}
@@ -89,7 +93,7 @@ func NewStream[I comparable, T any](store Store[I], name string, opts ...Option)
 		fn(&o)
 	}
 	return Stream[I, T]{
-		name:          name,
+		id:            id,
 		store:         store,
 		codec:         o.codec,
 		schemaVersion: o.schemaVersion,
@@ -97,8 +101,8 @@ func NewStream[I comparable, T any](store Store[I], name string, opts ...Option)
 	}
 }
 
-// Name returns the stream name.
-func (s Stream[I, T]) Name() string { return s.name }
+// ID returns the stream instance ID within the store's type.
+func (s Stream[I, T]) ID() string { return s.id }
 
 // SchemaVersion returns the current schema version used for new entries.
 func (s Stream[I, T]) SchemaVersion() int { return s.schemaVersion }
@@ -122,14 +126,14 @@ func (s Stream[I, T]) Append(ctx context.Context, entries ...AppendInput[T]) ([]
 			Tags:          e.Tags,
 		}
 	}
-	return s.store.Append(ctx, s.name, raw...)
+	return s.store.Append(ctx, s.id, raw...)
 }
 
 // Read returns decoded entries from the stream. Entries written with an older
 // schema version are automatically upcasted to the current version before
 // decoding into T.
 func (s Stream[I, T]) Read(ctx context.Context, opts ...ReadOption) ([]Entry[I, T], error) {
-	stored, err := s.store.Read(ctx, s.name, opts...)
+	stored, err := s.store.Read(ctx, s.id, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -167,10 +171,10 @@ func (s Stream[I, T]) Read(ctx context.Context, opts ...ReadOption) ([]Entry[I, 
 
 // SetTags replaces all tags on an entry in this stream.
 func (s Stream[I, T]) SetTags(ctx context.Context, id I, tags []string) error {
-	return s.store.SetTags(ctx, s.name, id, tags)
+	return s.store.SetTags(ctx, s.id, id, tags)
 }
 
 // SetAnnotations merges annotations into an entry in this stream.
 func (s Stream[I, T]) SetAnnotations(ctx context.Context, id I, annotations map[string]*string) error {
-	return s.store.SetAnnotations(ctx, s.name, id, annotations)
+	return s.store.SetAnnotations(ctx, s.id, id, annotations)
 }

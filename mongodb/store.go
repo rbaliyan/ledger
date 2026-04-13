@@ -104,6 +104,9 @@ func (s *Store) ensureIndexes(ctx context.Context) error {
 				SetUnique(true).
 				SetPartialFilterExpression(bson.D{{Key: "dedup_key", Value: bson.D{{Key: "$gt", Value: ""}}}}),
 		},
+		// Single-field stream index supports DISTINCT_SCAN plan for ListStreamIDs;
+		// cheap to maintain due to low cardinality of stream values.
+		{Keys: bson.D{{Key: "stream", Value: 1}}},
 	}
 	_, err := s.coll.Indexes().CreateMany(ctx, models)
 	return err
@@ -345,6 +348,52 @@ func (s *Store) SetAnnotations(ctx context.Context, stream string, id string, an
 	}
 	return nil
 }
+
+// ListStreamIDs returns distinct stream IDs with at least one entry in this store.
+// Results are ascending by stream ID and cursor-paginated via ListAfter/ListLimit.
+//
+// Implementation uses an aggregation pipeline with a cursor-bounded $match so
+// the work per page is O(limit * entries_per_stream) rather than a full collection
+// scan. The {stream:1} index supports the $match/$group stages.
+func (s *Store) ListStreamIDs(ctx context.Context, opts ...ledger.ListOption) ([]string, error) {
+	if s.closed.Load() {
+		return nil, ledger.ErrStoreClosed
+	}
+	o := ledger.ApplyListOptions(opts...)
+	ctx = s.sessionCtx(ctx)
+
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{{Key: "stream", Value: bson.D{{Key: "$gt", Value: o.After()}}}}}},
+		{{Key: "$group", Value: bson.D{{Key: "_id", Value: "$stream"}}}},
+		{{Key: "$sort", Value: bson.D{{Key: "_id", Value: 1}}}},
+		{{Key: "$limit", Value: int64(o.Limit())}},
+	}
+
+	cursor, err := s.coll.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, fmt.Errorf("ledger/mongodb: list stream ids: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var ids []string
+	for cursor.Next(ctx) {
+		var row struct {
+			ID string `bson:"_id"`
+		}
+		if err := cursor.Decode(&row); err != nil {
+			return nil, fmt.Errorf("ledger/mongodb: decode stream id: %w", err)
+		}
+		ids = append(ids, row.ID)
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, fmt.Errorf("ledger/mongodb: list stream ids cursor: %w", err)
+	}
+	return ids, nil
+}
+
+// Type returns the collection name this store is bound to, which represents the
+// entity type for all streams in this store. Intended for logging/tracing.
+func (s *Store) Type() string { return s.coll.Name() }
 
 // Trim deletes entries from the named stream with IDs <= beforeID.
 func (s *Store) Trim(ctx context.Context, stream string, beforeID string) (int64, error) {

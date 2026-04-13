@@ -82,6 +82,11 @@ func TestClosedStoreErrors(t *testing.T) {
 		t.Errorf("Trim on closed: %v, want ErrStoreClosed", err)
 	}
 
+	_, err = store.ListStreamIDs(ctx)
+	if !errors.Is(err, ledger.ErrStoreClosed) {
+		t.Errorf("ListStreamIDs on closed: %v, want ErrStoreClosed", err)
+	}
+
 	err = store.Health(ctx)
 	if !errors.Is(err, ledger.ErrStoreClosed) {
 		t.Errorf("Health on closed: %v, want ErrStoreClosed", err)
@@ -102,6 +107,61 @@ func TestHealth(t *testing.T) {
 	store := newTestStore(t)
 	if err := store.Health(context.Background()); err != nil {
 		t.Fatalf("Health: %v", err)
+	}
+}
+
+// TestCrossStoreIsolation verifies that two stores on the same database but
+// different tables do not share any entries: each store represents one type.
+func TestCrossStoreIsolation(t *testing.T) {
+	db := openTestDB(t)
+	ctx := context.Background()
+
+	orders, err := sqlite.New(ctx, db, sqlite.WithTable("ledger_orders"))
+	if err != nil {
+		t.Fatalf("new orders store: %v", err)
+	}
+	t.Cleanup(func() { orders.Close(ctx) })
+
+	users, err := sqlite.New(ctx, db, sqlite.WithTable("ledger_users"))
+	if err != nil {
+		t.Fatalf("new users store: %v", err)
+	}
+	t.Cleanup(func() { users.Close(ctx) })
+
+	// Append to each store with the same stream instance name.
+	if _, err := orders.Append(ctx, "alice", ledger.RawEntry{Payload: []byte(`"order"`), SchemaVersion: 1}); err != nil {
+		t.Fatalf("append orders: %v", err)
+	}
+	if _, err := users.Append(ctx, "alice", ledger.RawEntry{Payload: []byte(`"user"`), SchemaVersion: 1}); err != nil {
+		t.Fatalf("append users: %v", err)
+	}
+
+	// Each store sees only its own entries.
+	o, _ := orders.Read(ctx, "alice")
+	u, _ := users.Read(ctx, "alice")
+	if len(o) != 1 || string(o[0].Payload) != `"order"` {
+		t.Errorf("orders/alice payload = %v", o)
+	}
+	if len(u) != 1 || string(u[0].Payload) != `"user"` {
+		t.Errorf("users/alice payload = %v", u)
+	}
+
+	// Each store's Type() returns its own table name.
+	if orders.Type() != "ledger_orders" {
+		t.Errorf("orders.Type() = %q", orders.Type())
+	}
+	if users.Type() != "ledger_users" {
+		t.Errorf("users.Type() = %q", users.Type())
+	}
+
+	// ListStreamIDs is scoped per store.
+	oIDs, _ := orders.ListStreamIDs(ctx)
+	uIDs, _ := users.ListStreamIDs(ctx)
+	if len(oIDs) != 1 || oIDs[0] != "alice" {
+		t.Errorf("orders ListStreamIDs = %v", oIDs)
+	}
+	if len(uIDs) != 1 || uIDs[0] != "alice" {
+		t.Errorf("users ListStreamIDs = %v", uIDs)
 	}
 }
 
