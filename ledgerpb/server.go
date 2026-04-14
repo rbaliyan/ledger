@@ -68,7 +68,7 @@ func (s *Server) Append(ctx context.Context, req *ledgerv1.AppendRequest) (*ledg
 			Payload:       json.RawMessage(e.Payload),
 			OrderKey:      e.OrderKey,
 			DedupKey:      e.DedupKey,
-			SchemaVersion: int(e.SchemaVersion),
+			SchemaVersion: int(e.SchemaVersion), //nolint:gosec // proto int64 fits in int
 			Metadata:      e.Metadata,
 			Tags:          e.Tags,
 		}
@@ -166,7 +166,7 @@ func readOptionsFromProto(p *ledgerv1.ReadOptions) ReadOptions {
 	}
 	return ReadOptions{
 		After:    p.After,
-		Limit:    int(p.Limit),
+		Limit:    int(p.Limit), //nolint:gosec // proto int64 fits in int
 		Desc:     p.Desc,
 		OrderKey: p.OrderKey,
 		Tag:      p.Tag,
@@ -182,7 +182,7 @@ func storedEntryToProto(e StoredEntry) *ledgerv1.Entry {
 		Payload:       e.Payload,
 		OrderKey:      e.OrderKey,
 		DedupKey:      e.DedupKey,
-		SchemaVersion: int32(e.SchemaVersion),
+		SchemaVersion: int64(e.SchemaVersion),
 		Metadata:      e.Metadata,
 		Tags:          e.Tags,
 		Annotations:   e.Annotations,

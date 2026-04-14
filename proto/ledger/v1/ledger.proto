@@ -63,7 +63,7 @@ message EntryInput {
   string dedup_key = 3;
 
   // schema_version is stamped on the entry at write time. Defaults to 1.
-  int32 schema_version = 4;
+  int64 schema_version = 4;
 
   // metadata is immutable key-value data set at append time
   // (e.g., trace_id, source, tenant_id).
@@ -89,7 +89,7 @@ message Entry {
   string dedup_key = 5;
 
   // schema_version is the version stamped at write time.
-  int32 schema_version = 6;
+  int64 schema_version = 6;
 
   // metadata is the immutable key-value data set at append time.
   map<string, string> metadata = 7;
@@ -116,7 +116,7 @@ message ReadOptions {
   string after = 1;
 
   // limit caps the number of entries returned. 0 means the backend default (100).
-  int32 limit = 2;
+  int64 limit = 2;
 
   // desc returns entries newest-first (descending by ID) when true.
   bool desc = 3;
@@ -226,7 +226,7 @@ message ListStreamIDsRequest {
   string after = 1;
 
   // limit caps the number of IDs returned. 0 means the backend default (100).
-  int32 limit = 2;
+  int64 limit = 2;
 }
 
 message ListStreamIDsResponse {

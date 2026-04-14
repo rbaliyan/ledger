@@ -35,7 +35,7 @@ type EntryInput struct {
 	// in the stream the entry is silently skipped. Empty means no dedup.
 	DedupKey string `protobuf:"bytes,3,opt,name=dedup_key,json=dedupKey,proto3" json:"dedup_key,omitempty"`
 	// schema_version is stamped on the entry at write time. Defaults to 1.
-	SchemaVersion int32 `protobuf:"varint,4,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
+	SchemaVersion int64 `protobuf:"varint,4,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
 	// metadata is immutable key-value data set at append time
 	// (e.g., trace_id, source, tenant_id).
 	Metadata map[string]string `protobuf:"bytes,5,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
@@ -96,7 +96,7 @@ func (x *EntryInput) GetDedupKey() string {
 	return ""
 }
 
-func (x *EntryInput) GetSchemaVersion() int32 {
+func (x *EntryInput) GetSchemaVersion() int64 {
 	if x != nil {
 		return x.SchemaVersion
 	}
@@ -130,7 +130,7 @@ type Entry struct {
 	OrderKey string `protobuf:"bytes,4,opt,name=order_key,json=orderKey,proto3" json:"order_key,omitempty"`
 	DedupKey string `protobuf:"bytes,5,opt,name=dedup_key,json=dedupKey,proto3" json:"dedup_key,omitempty"`
 	// schema_version is the version stamped at write time.
-	SchemaVersion int32 `protobuf:"varint,6,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
+	SchemaVersion int64 `protobuf:"varint,6,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
 	// metadata is the immutable key-value data set at append time.
 	Metadata map[string]string `protobuf:"bytes,7,rep,name=metadata,proto3" json:"metadata,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// tags are the current mutable labels on the entry.
@@ -211,7 +211,7 @@ func (x *Entry) GetDedupKey() string {
 	return ""
 }
 
-func (x *Entry) GetSchemaVersion() int32 {
+func (x *Entry) GetSchemaVersion() int64 {
 	if x != nil {
 		return x.SchemaVersion
 	}
@@ -261,7 +261,7 @@ type ReadOptions struct {
 	// value are returned. Empty string means "from the beginning".
 	After string `protobuf:"bytes,1,opt,name=after,proto3" json:"after,omitempty"`
 	// limit caps the number of entries returned. 0 means the backend default (100).
-	Limit int32 `protobuf:"varint,2,opt,name=limit,proto3" json:"limit,omitempty"`
+	Limit int64 `protobuf:"varint,2,opt,name=limit,proto3" json:"limit,omitempty"`
 	// desc returns entries newest-first (descending by ID) when true.
 	Desc bool `protobuf:"varint,3,opt,name=desc,proto3" json:"desc,omitempty"`
 	// order_key filters entries by their order_key field.
@@ -311,7 +311,7 @@ func (x *ReadOptions) GetAfter() string {
 	return ""
 }
 
-func (x *ReadOptions) GetLimit() int32 {
+func (x *ReadOptions) GetLimit() int64 {
 	if x != nil {
 		return x.Limit
 	}
@@ -943,7 +943,7 @@ type ListStreamIDsRequest struct {
 	// are returned. Empty string means "from the beginning".
 	After string `protobuf:"bytes,1,opt,name=after,proto3" json:"after,omitempty"`
 	// limit caps the number of IDs returned. 0 means the backend default (100).
-	Limit         int32 `protobuf:"varint,2,opt,name=limit,proto3" json:"limit,omitempty"`
+	Limit         int64 `protobuf:"varint,2,opt,name=limit,proto3" json:"limit,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -985,7 +985,7 @@ func (x *ListStreamIDsRequest) GetAfter() string {
 	return ""
 }
 
-func (x *ListStreamIDsRequest) GetLimit() int32 {
+func (x *ListStreamIDsRequest) GetLimit() int64 {
 	if x != nil {
 		return x.Limit
 	}
@@ -1128,7 +1128,7 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\apayload\x18\x01 \x01(\fR\apayload\x12\x1b\n" +
 	"\torder_key\x18\x02 \x01(\tR\borderKey\x12\x1b\n" +
 	"\tdedup_key\x18\x03 \x01(\tR\bdedupKey\x12%\n" +
-	"\x0eschema_version\x18\x04 \x01(\x05R\rschemaVersion\x12?\n" +
+	"\x0eschema_version\x18\x04 \x01(\x03R\rschemaVersion\x12?\n" +
 	"\bmetadata\x18\x05 \x03(\v2#.ledger.v1.EntryInput.MetadataEntryR\bmetadata\x12\x12\n" +
 	"\x04tags\x18\x06 \x03(\tR\x04tags\x1a;\n" +
 	"\rMetadataEntry\x12\x10\n" +
@@ -1140,7 +1140,7 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\apayload\x18\x03 \x01(\fR\apayload\x12\x1b\n" +
 	"\torder_key\x18\x04 \x01(\tR\borderKey\x12\x1b\n" +
 	"\tdedup_key\x18\x05 \x01(\tR\bdedupKey\x12%\n" +
-	"\x0eschema_version\x18\x06 \x01(\x05R\rschemaVersion\x12:\n" +
+	"\x0eschema_version\x18\x06 \x01(\x03R\rschemaVersion\x12:\n" +
 	"\bmetadata\x18\a \x03(\v2\x1e.ledger.v1.Entry.MetadataEntryR\bmetadata\x12\x12\n" +
 	"\x04tags\x18\b \x03(\tR\x04tags\x12C\n" +
 	"\vannotations\x18\t \x03(\v2!.ledger.v1.Entry.AnnotationsEntryR\vannotations\x129\n" +
@@ -1157,7 +1157,7 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x97\x01\n" +
 	"\vReadOptions\x12\x14\n" +
 	"\x05after\x18\x01 \x01(\tR\x05after\x12\x14\n" +
-	"\x05limit\x18\x02 \x01(\x05R\x05limit\x12\x12\n" +
+	"\x05limit\x18\x02 \x01(\x03R\x05limit\x12\x12\n" +
 	"\x04desc\x18\x03 \x01(\bR\x04desc\x12\x1b\n" +
 	"\torder_key\x18\x04 \x01(\tR\borderKey\x12\x10\n" +
 	"\x03tag\x18\x05 \x01(\tR\x03tag\x12\x19\n" +
@@ -1197,7 +1197,7 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\adeleted\x18\x01 \x01(\x03R\adeleted\"B\n" +
 	"\x14ListStreamIDsRequest\x12\x14\n" +
 	"\x05after\x18\x01 \x01(\tR\x05after\x12\x14\n" +
-	"\x05limit\x18\x02 \x01(\x05R\x05limit\"6\n" +
+	"\x05limit\x18\x02 \x01(\x03R\x05limit\"6\n" +
 	"\x15ListStreamIDsResponse\x12\x1d\n" +
 	"\n" +
 	"stream_ids\x18\x01 \x03(\tR\tstreamIds\"\x0f\n" +
