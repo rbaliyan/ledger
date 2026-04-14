@@ -25,3 +25,8 @@ linters:
       - path: storetest/
         linters:
           - errcheck
+      - path: ledgerpb/server_test.go
+        linters:
+          - errcheck
+    paths:
+      - api/
