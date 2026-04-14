@@ -18,6 +18,14 @@ PG_DB := "ledger_test"
 default:
     @just --list
 
+# Generate protobuf code (requires buf via mise)
+proto:
+    buf generate
+
+# Lint protobuf definitions
+proto-lint:
+    buf lint
+
 # Build all packages
 build:
     go build ./...
