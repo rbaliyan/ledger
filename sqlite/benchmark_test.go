@@ -3,6 +3,7 @@ package sqlite_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -29,15 +30,15 @@ func benchStore(b *testing.B) *sqlite.Store {
 func BenchmarkAppend(b *testing.B) {
 	store := benchStore(b)
 	ctx := context.Background()
-	entry := ledger.RawEntry{
-		Payload:       []byte(`{"id":"bench","amount":42.5}`),
+	entry := ledger.RawEntry[json.RawMessage]{
+		Payload:       json.RawMessage(`{"id":"bench","amount":42.5}`),
 		OrderKey:      "key-1",
 		SchemaVersion: 1,
 	}
 
 	b.ResetTimer()
 	for i := range b.N {
-		store.Append(ctx, "bench", ledger.RawEntry{
+		store.Append(ctx, "bench", ledger.RawEntry[json.RawMessage]{
 			Payload:       entry.Payload,
 			OrderKey:      entry.OrderKey,
 			DedupKey:      fmt.Sprintf("d-%d", i),
@@ -50,10 +51,10 @@ func BenchmarkAppendBatch(b *testing.B) {
 	store := benchStore(b)
 	ctx := context.Background()
 
-	batch := make([]ledger.RawEntry, 100)
+	batch := make([]ledger.RawEntry[json.RawMessage], 100)
 	for i := range batch {
-		batch[i] = ledger.RawEntry{
-			Payload:       []byte(`{"id":"bench"}`),
+		batch[i] = ledger.RawEntry[json.RawMessage]{
+			Payload:       json.RawMessage(`{"id":"bench"}`),
 			SchemaVersion: 1,
 		}
 	}
@@ -69,8 +70,8 @@ func BenchmarkRead(b *testing.B) {
 	ctx := context.Background()
 
 	for i := range 1000 {
-		store.Append(ctx, "bench-read", ledger.RawEntry{
-			Payload:       []byte(fmt.Sprintf(`{"i":%d}`, i)),
+		store.Append(ctx, "bench-read", ledger.RawEntry[json.RawMessage]{
+			Payload:       json.RawMessage(fmt.Sprintf(`{"i":%d}`, i)),
 			SchemaVersion: 1,
 		})
 	}
@@ -86,8 +87,8 @@ func BenchmarkReadWithCursor(b *testing.B) {
 	ctx := context.Background()
 
 	for i := range 1000 {
-		store.Append(ctx, "bench-cursor", ledger.RawEntry{
-			Payload:       []byte(fmt.Sprintf(`{"i":%d}`, i)),
+		store.Append(ctx, "bench-cursor", ledger.RawEntry[json.RawMessage]{
+			Payload:       json.RawMessage(fmt.Sprintf(`{"i":%d}`, i)),
 			SchemaVersion: 1,
 		})
 	}

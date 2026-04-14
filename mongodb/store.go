@@ -27,14 +27,14 @@ import (
 )
 
 var (
-	_ ledger.Store[string] = (*Store)(nil)
-	_ ledger.HealthChecker = (*Store)(nil)
+	_ ledger.Store[string, bson.Raw] = (*Store)(nil)
+	_ ledger.HealthChecker           = (*Store)(nil)
 )
 
 type entry struct {
 	ID            bson.ObjectID     `bson:"_id,omitempty"`
 	Stream        string            `bson:"stream"`
-	Payload       []byte            `bson:"payload"`
+	Payload       bson.Raw          `bson:"payload"`
 	OrderKey      string            `bson:"order_key"`
 	DedupKey      string            `bson:"dedup_key"`
 	SchemaVersion int               `bson:"schema_version"`
@@ -133,7 +133,7 @@ func (s *Store) sessionCtx(ctx context.Context) context.Context {
 }
 
 // Append adds entries to the named stream.
-func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.RawEntry) ([]string, error) {
+func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.RawEntry[bson.Raw]) ([]string, error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
 	}
@@ -191,7 +191,7 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 }
 
 // Read returns entries from the named stream.
-func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[string], error) {
+func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[string, bson.Raw], error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
 	}
@@ -243,13 +243,13 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 	}
 	defer cursor.Close(ctx)
 
-	var entries []ledger.StoredEntry[string]
+	var entries []ledger.StoredEntry[string, bson.Raw]
 	for cursor.Next(ctx) {
 		var doc entry
 		if err := cursor.Decode(&doc); err != nil {
 			return nil, fmt.Errorf("ledger/mongodb: decode: %w", err)
 		}
-		entries = append(entries, ledger.StoredEntry[string]{
+		entries = append(entries, ledger.StoredEntry[string, bson.Raw]{
 			ID:            doc.ID.Hex(),
 			Stream:        doc.Stream,
 			Payload:       doc.Payload,
@@ -427,4 +427,22 @@ func (s *Store) Health(ctx context.Context) error {
 func (s *Store) Close(_ context.Context) error {
 	s.closed.Store(true)
 	return nil
+}
+
+// BSONCodec implements [ledger.PayloadCodec][T, bson.Raw] using the MongoDB BSON driver.
+// Use this as the codec when constructing a [ledger.Stream] backed by this MongoDB store.
+type BSONCodec[T any] struct{}
+
+// Marshal encodes v to a BSON document.
+func (BSONCodec[T]) Marshal(v T) (bson.Raw, error) {
+	b, err := bson.Marshal(v)
+	if err != nil {
+		return nil, err
+	}
+	return bson.Raw(b), nil
+}
+
+// Unmarshal decodes a BSON document into v.
+func (BSONCodec[T]) Unmarshal(p bson.Raw, v *T) error {
+	return bson.Unmarshal(p, v)
 }

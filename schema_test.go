@@ -15,7 +15,7 @@ func TestFieldMapper_Upcast(t *testing.T) {
 		RemoveField("legacy_id")
 
 	input := `{"customer_name":"John","legacy_id":"old123","amount":99}`
-	result, err := mapper.Upcast(ctx, []byte(input))
+	result, err := mapper.Upcast(ctx, json.RawMessage(input))
 	if err != nil {
 		t.Fatalf("Upcast: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestFieldMapper_DefaultPreservesExisting(t *testing.T) {
 
 	mapper := NewFieldMapper(1, 2).AddDefault("email", "default@example.com")
 	input := `{"email":"existing@example.com"}`
-	result, err := mapper.Upcast(ctx, []byte(input))
+	result, err := mapper.Upcast(ctx, json.RawMessage(input))
 	if err != nil {
 		t.Fatalf("Upcast: %v", err)
 	}
@@ -69,18 +69,19 @@ func TestFieldMapper_DefaultPreservesExisting(t *testing.T) {
 func TestUpcasterFunc(t *testing.T) {
 	ctx := context.Background()
 
-	u := UpcasterFunc(1, 2, func(ctx context.Context, data []byte) ([]byte, error) {
+	u := UpcasterFunc(1, 2, func(ctx context.Context, data json.RawMessage) (json.RawMessage, error) {
 		var m map[string]any
 		json.Unmarshal(data, &m)
 		m["version"] = 2
-		return json.Marshal(m)
+		b, err := json.Marshal(m)
+		return json.RawMessage(b), err
 	})
 
 	if u.FromVersion() != 1 || u.ToVersion() != 2 {
 		t.Errorf("versions = %d→%d, want 1→2", u.FromVersion(), u.ToVersion())
 	}
 
-	result, err := u.Upcast(ctx, []byte(`{"x":1}`))
+	result, err := u.Upcast(ctx, json.RawMessage(`{"x":1}`))
 	if err != nil {
 		t.Fatalf("Upcast: %v", err)
 	}
@@ -95,13 +96,13 @@ func TestUpcasterFunc(t *testing.T) {
 func TestUpcastChain(t *testing.T) {
 	ctx := context.Background()
 
-	upcasters := []Upcaster{
+	upcasters := []Upcaster[json.RawMessage]{
 		NewFieldMapper(1, 2).AddDefault("v2_field", "added_in_v2"),
 		NewFieldMapper(2, 3).AddDefault("v3_field", "added_in_v3"),
 	}
 
 	input := `{"original":"data"}`
-	result, err := upcastChain(ctx, []byte(input), 1, 3, upcasters)
+	result, err := upcastChain(ctx, json.RawMessage(input), 1, 3, upcasters)
 	if err != nil {
 		t.Fatalf("upcastChain: %v", err)
 	}
@@ -123,12 +124,12 @@ func TestUpcastChain(t *testing.T) {
 func TestUpcastChain_MissingUpcaster(t *testing.T) {
 	ctx := context.Background()
 
-	upcasters := []Upcaster{
+	upcasters := []Upcaster[json.RawMessage]{
 		NewFieldMapper(1, 2).AddDefault("x", "y"),
 		// Missing v2→v3
 	}
 
-	_, err := upcastChain(ctx, []byte(`{}`), 1, 3, upcasters)
+	_, err := upcastChain(ctx, json.RawMessage(`{}`), 1, 3, upcasters)
 	if err == nil {
 		t.Fatal("expected error for missing upcaster")
 	}
@@ -136,7 +137,7 @@ func TestUpcastChain_MissingUpcaster(t *testing.T) {
 
 func TestUpcastChain_SameVersion(t *testing.T) {
 	ctx := context.Background()
-	result, err := upcastChain(ctx, []byte(`{"x":1}`), 2, 2, nil)
+	result, err := upcastChain(ctx, json.RawMessage(`{"x":1}`), 2, 2, nil)
 	if err != nil {
 		t.Fatalf("upcastChain same version: %v", err)
 	}
@@ -211,21 +212,21 @@ func TestOrderString(t *testing.T) {
 }
 
 func TestJSONCodecRoundTrip(t *testing.T) {
-	codec := JSONCodec{}
-
 	type payload struct {
 		Name string `json:"name"`
 		N    int    `json:"n"`
 	}
 
-	data, err := codec.Encode(payload{Name: "test", N: 42})
+	codec := JSONCodec[payload]{}
+
+	data, err := codec.Marshal(payload{Name: "test", N: 42})
 	if err != nil {
-		t.Fatalf("Encode: %v", err)
+		t.Fatalf("Marshal: %v", err)
 	}
 
 	var decoded payload
-	if err := codec.Decode(data, &decoded); err != nil {
-		t.Fatalf("Decode: %v", err)
+	if err := codec.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("Unmarshal: %v", err)
 	}
 	if decoded.Name != "test" || decoded.N != 42 {
 		t.Errorf("decoded = %+v", decoded)
@@ -233,18 +234,18 @@ func TestJSONCodecRoundTrip(t *testing.T) {
 }
 
 func TestJSONCodecErrors(t *testing.T) {
-	codec := JSONCodec{}
+	codec := JSONCodec[any]{}
 
-	// Encode error: channels can't be marshaled
-	_, err := codec.Encode(make(chan int))
+	// Marshal error: channels can't be marshaled
+	_, err := codec.Marshal(make(chan int))
 	if err == nil {
-		t.Error("Encode(chan) should error")
+		t.Error("Marshal(chan) should error")
 	}
 
-	// Decode error: invalid JSON
+	// Unmarshal error: invalid JSON
 	var v any
-	if err := codec.Decode([]byte(`{invalid`), &v); err == nil {
-		t.Error("Decode(invalid) should error")
+	if err := codec.Unmarshal(json.RawMessage(`{invalid`), &v); err == nil {
+		t.Error("Unmarshal(invalid) should error")
 	}
 }
 
@@ -254,12 +255,12 @@ func TestNewStreamPanicsOnNilStore(t *testing.T) {
 			t.Error("NewStream with nil store should panic")
 		}
 	}()
-	NewStream[int64, any](nil, "test")
+	NewStream[int64, json.RawMessage, any](nil, "test", JSONCodec[any]{})
 }
 
 func TestFieldMapper_NilPayload(t *testing.T) {
 	mapper := NewFieldMapper(1, 2).AddDefault("x", "y")
-	result, err := mapper.Upcast(context.Background(), []byte(`null`))
+	result, err := mapper.Upcast(context.Background(), json.RawMessage(`null`))
 	if err != nil {
 		t.Fatalf("Upcast null: %v", err)
 	}
@@ -271,7 +272,7 @@ func TestFieldMapper_NilPayload(t *testing.T) {
 
 func TestFieldMapper_InvalidJSON(t *testing.T) {
 	mapper := NewFieldMapper(1, 2)
-	_, err := mapper.Upcast(context.Background(), []byte(`{invalid`))
+	_, err := mapper.Upcast(context.Background(), json.RawMessage(`{invalid`))
 	if err == nil {
 		t.Error("Upcast invalid JSON should error")
 	}

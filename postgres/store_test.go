@@ -3,14 +3,15 @@ package postgres_test
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"testing"
 
+	_ "github.com/lib/pq"
 	"github.com/rbaliyan/ledger"
 	"github.com/rbaliyan/ledger/postgres"
 	"github.com/rbaliyan/ledger/storetest"
-	_ "github.com/lib/pq"
 )
 
 func newTestStore(t *testing.T) *postgres.Store {
@@ -40,7 +41,9 @@ func newTestStore(t *testing.T) *postgres.Store {
 
 func TestConformance(t *testing.T) {
 	store := newTestStore(t)
-	storetest.RunStoreTests(t, store, ledger.After[int64])
+	storetest.RunStoreTests(t, store, ledger.After[int64], storetest.TestConfig[json.RawMessage]{
+		SamplePayload: json.RawMessage(`{}`),
+	})
 }
 
 func TestClosedStoreErrors(t *testing.T) {
@@ -48,7 +51,7 @@ func TestClosedStoreErrors(t *testing.T) {
 	ctx := context.Background()
 	store.Close(ctx)
 
-	_, err := store.Append(ctx, "stream", ledger.RawEntry{Payload: []byte(`{}`)})
+	_, err := store.Append(ctx, "stream", ledger.RawEntry[json.RawMessage]{Payload: json.RawMessage(`{}`)})
 	if !errors.Is(err, ledger.ErrStoreClosed) {
 		t.Errorf("Append on closed: %v, want ErrStoreClosed", err)
 	}
@@ -126,10 +129,10 @@ func TestCrossStoreIsolation(t *testing.T) {
 	db.Exec("TRUNCATE TABLE ledger_iso_orders RESTART IDENTITY") //nolint:errcheck
 	db.Exec("TRUNCATE TABLE ledger_iso_users RESTART IDENTITY")  //nolint:errcheck
 
-	if _, err := orders.Append(ctx, "alice", ledger.RawEntry{Payload: []byte(`"order"`), SchemaVersion: 1}); err != nil {
+	if _, err := orders.Append(ctx, "alice", ledger.RawEntry[json.RawMessage]{Payload: json.RawMessage(`"order"`), SchemaVersion: 1}); err != nil {
 		t.Fatalf("append orders: %v", err)
 	}
-	if _, err := users.Append(ctx, "alice", ledger.RawEntry{Payload: []byte(`"user"`), SchemaVersion: 1}); err != nil {
+	if _, err := users.Append(ctx, "alice", ledger.RawEntry[json.RawMessage]{Payload: json.RawMessage(`"user"`), SchemaVersion: 1}); err != nil {
 		t.Fatalf("append users: %v", err)
 	}
 

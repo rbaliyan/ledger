@@ -30,94 +30,102 @@ type AppendInput[T any] struct {
 	Tags     []string          // Initial tags (can be updated later via SetTags).
 }
 
-// options configures a Stream.
-type options struct {
-	codec         Codec
+// options holds per-stream configuration that does not depend on the domain type T.
+// P is the store-native payload type.
+type options[P any] struct {
 	schemaVersion int
-	upcasters     []Upcaster
+	upcasters     []Upcaster[P]
 }
 
-// Option configures a Stream.
-type Option func(*options)
-
-// WithCodec sets the codec used to encode/decode payloads. Defaults to JSONCodec.
-func WithCodec(c Codec) Option {
-	return func(o *options) { o.codec = c }
-}
+// Option configures a Stream. P is the store-native payload type.
+type Option[P any] func(*options[P])
 
 // WithSchemaVersion sets the schema version stamped on new entries.
 // Defaults to 1. When reading entries with older versions, registered
 // upcasters are applied to transform the payload before decoding.
-func WithSchemaVersion(v int) Option {
-	return func(o *options) {
+func WithSchemaVersion[P any](v int) Option[P] {
+	return func(o *options[P]) {
 		if v > 0 {
 			o.schemaVersion = v
 		}
 	}
 }
 
-// WithUpcaster registers an upcaster for transforming entries from one
+// WithUpcaster registers an upcaster for transforming payloads from one
 // schema version to the next. Register in sequence (v1→v2, v2→v3).
-func WithUpcaster(u Upcaster) Option {
-	return func(o *options) { o.upcasters = append(o.upcasters, u) }
+func WithUpcaster[P any](u Upcaster[P]) Option[P] {
+	return func(o *options[P]) { o.upcasters = append(o.upcasters, u) }
 }
 
 // Stream is a lightweight, typed handle to a stream instance within a store.
-// The Store represents the entity type (table/collection); the Stream's id
-// identifies the particular instance within that type.
+//
+//   - I is the store ID type (e.g. int64 for SQL, string for MongoDB).
+//   - P is the store-native payload type (e.g. json.RawMessage, bson.Raw).
+//   - T is the user's domain payload type.
+//
+// The codec bridges T and P on every append and read. The Store represents
+// the entity type (table/collection); the Stream's id identifies the
+// particular instance within that type.
 //
 // It is cheap to create — create one per operation and discard it.
 // Stream is safe for concurrent use.
-type Stream[I comparable, T any] struct {
+type Stream[I comparable, P any, T any] struct {
 	id            string
-	store         Store[I]
-	codec         Codec
+	store         Store[I, P]
+	codec         PayloadCodec[T, P]
 	schemaVersion int
-	upcasters     []Upcaster
+	upcasters     []Upcaster[P]
 }
 
 // NewStream creates a lightweight stream handle. The stream does not need to
 // exist in the store beforehand — it is created implicitly on first append.
 // The id identifies the stream instance within the store's type.
 //
+// codec is required and must not be nil. For SQL backends use [JSONCodec];
+// for MongoDB use the BSONCodec provided by the mongodb package.
+//
 // Panics if store is nil.
-func NewStream[I comparable, T any](store Store[I], id string, opts ...Option) Stream[I, T] {
+func NewStream[I comparable, P any, T any](
+	store Store[I, P],
+	id string,
+	codec PayloadCodec[T, P],
+	opts ...Option[P],
+) Stream[I, P, T] {
 	if store == nil {
 		panic("ledger: NewStream called with nil store")
 	}
-	o := options{
-		codec:         JSONCodec{},
+	o := options[P]{
 		schemaVersion: 1,
 	}
 	for _, fn := range opts {
 		fn(&o)
 	}
-	return Stream[I, T]{
+	return Stream[I, P, T]{
 		id:            id,
 		store:         store,
-		codec:         o.codec,
+		codec:         codec,
 		schemaVersion: o.schemaVersion,
 		upcasters:     o.upcasters,
 	}
 }
 
 // ID returns the stream instance ID within the store's type.
-func (s Stream[I, T]) ID() string { return s.id }
+func (s Stream[I, P, T]) ID() string { return s.id }
 
 // SchemaVersion returns the current schema version used for new entries.
-func (s Stream[I, T]) SchemaVersion() int { return s.schemaVersion }
+func (s Stream[I, P, T]) SchemaVersion() int { return s.schemaVersion }
 
 // Append encodes and appends entries to the stream. Returns IDs of newly appended entries.
 // Each entry is stamped with the stream's current schema version.
 // Entries with duplicate dedup keys are silently skipped.
-func (s Stream[I, T]) Append(ctx context.Context, entries ...AppendInput[T]) ([]I, error) {
-	raw := make([]RawEntry, len(entries))
+func (s Stream[I, P, T]) Append(ctx context.Context, entries ...AppendInput[T]) ([]I, error) {
+	raw := make([]RawEntry[P], len(entries))
 	for i, e := range entries {
-		data, err := s.codec.Encode(e.Payload)
+		data, err := s.codec.Marshal(e.Payload)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrEncode, err)
 		}
-		raw[i] = RawEntry{
+		raw[i] = RawEntry[P]{
 			Payload:       data,
 			OrderKey:      e.OrderKey,
 			DedupKey:      e.DedupKey,
@@ -132,7 +140,7 @@ func (s Stream[I, T]) Append(ctx context.Context, entries ...AppendInput[T]) ([]
 // Read returns decoded entries from the stream. Entries written with an older
 // schema version are automatically upcasted to the current version before
 // decoding into T.
-func (s Stream[I, T]) Read(ctx context.Context, opts ...ReadOption) ([]Entry[I, T], error) {
+func (s Stream[I, P, T]) Read(ctx context.Context, opts ...ReadOption) ([]Entry[I, T], error) {
 	stored, err := s.store.Read(ctx, s.id, opts...)
 	if err != nil {
 		return nil, err
@@ -149,7 +157,7 @@ func (s Stream[I, T]) Read(ctx context.Context, opts ...ReadOption) ([]Entry[I, 
 		}
 
 		var decoded T
-		if err := s.codec.Decode(payload, &decoded); err != nil {
+		if err := s.codec.Unmarshal(payload, &decoded); err != nil {
 			return nil, fmt.Errorf("%w: %v", ErrDecode, err)
 		}
 		entries[i] = Entry[I, T]{
@@ -170,11 +178,11 @@ func (s Stream[I, T]) Read(ctx context.Context, opts ...ReadOption) ([]Entry[I, 
 }
 
 // SetTags replaces all tags on an entry in this stream.
-func (s Stream[I, T]) SetTags(ctx context.Context, id I, tags []string) error {
+func (s Stream[I, P, T]) SetTags(ctx context.Context, id I, tags []string) error {
 	return s.store.SetTags(ctx, s.id, id, tags)
 }
 
 // SetAnnotations merges annotations into an entry in this stream.
-func (s Stream[I, T]) SetAnnotations(ctx context.Context, id I, annotations map[string]*string) error {
+func (s Stream[I, P, T]) SetAnnotations(ctx context.Context, id I, annotations map[string]*string) error {
 	return s.store.SetAnnotations(ctx, s.id, id, annotations)
 }

@@ -2,6 +2,7 @@ package ledger_test
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/rbaliyan/ledger"
@@ -10,7 +11,7 @@ import (
 // mockStore is a minimal store for examples.
 type mockStore struct{}
 
-func (mockStore) Append(_ context.Context, _ string, entries ...ledger.RawEntry) ([]int64, error) {
+func (mockStore) Append(_ context.Context, _ string, entries ...ledger.RawEntry[json.RawMessage]) ([]int64, error) {
 	ids := make([]int64, len(entries))
 	for i := range entries {
 		ids[i] = int64(i + 1)
@@ -18,7 +19,7 @@ func (mockStore) Append(_ context.Context, _ string, entries ...ledger.RawEntry)
 	return ids, nil
 }
 
-func (mockStore) Read(_ context.Context, _ string, _ ...ledger.ReadOption) ([]ledger.StoredEntry[int64], error) {
+func (mockStore) Read(_ context.Context, _ string, _ ...ledger.ReadOption) ([]ledger.StoredEntry[int64, json.RawMessage], error) {
 	return nil, nil
 }
 
@@ -48,7 +49,7 @@ func ExampleNewStream() {
 
 	// The store represents the "orders" type (one table/collection).
 	// The stream is one instance within that type, identified by a stream ID.
-	s := ledger.NewStream[int64, Order](store, "user-123")
+	s := ledger.NewStream(store, "user-123", ledger.JSONCodec[Order]{})
 
 	ids, err := s.Append(context.Background(), ledger.AppendInput[Order]{
 		Payload:  Order{ID: "o-1", Amount: 99.99},
@@ -72,8 +73,8 @@ func ExampleNewStream_schemaVersioning() {
 	}
 
 	// Create a v2 stream with upcaster from v1
-	s := ledger.NewStream[int64, OrderV2](store, "user-123",
-		ledger.WithSchemaVersion(2),
+	s := ledger.NewStream(store, "user-123", ledger.JSONCodec[OrderV2]{},
+		ledger.WithSchemaVersion[json.RawMessage](2),
 		ledger.WithUpcaster(ledger.NewFieldMapper(1, 2).
 			RenameField("customer_name", "name").
 			AddDefault("email", "unknown@example.com")),

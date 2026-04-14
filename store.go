@@ -2,8 +2,10 @@
 // schema versioning, deduplication, and pluggable storage backends.
 //
 // The core abstraction is a two-level generic design:
-//   - [Store] is the backend interface, generic over the ID type (int64 for SQL, string for MongoDB).
-//   - [Stream] is a lightweight typed handle, generic over both ID and payload types.
+//   - [Store] is the backend interface, generic over the ID type I and the
+//     store-native payload type P (e.g. json.RawMessage for SQL, bson.Raw for MongoDB).
+//   - [Stream] is a lightweight typed handle, generic over I, P, and the user's
+//     domain payload type T. A [PayloadCodec] bridges T and P.
 //
 // Streams are cheap to create — one per operation, then discard. Schema versioning
 // with [Upcaster] chains enables safe payload evolution without downtime.
@@ -12,7 +14,8 @@
 // CreatedAt) set at append time, and mutable fields (Tags, Annotations) that can be
 // updated after the entry is written.
 //
-// Backends: sqlite, postgres, mongodb.
+// Backends: sqlite (Store[int64, json.RawMessage]), postgres (Store[int64, json.RawMessage]),
+// mongodb (Store[string, bson.Raw]).
 package ledger
 
 import (
@@ -22,6 +25,7 @@ import (
 
 // Store is the backend storage interface for append-only log entries.
 // I is the ID type used for cursor-based iteration (e.g., int64 for SQL, string for MongoDB).
+// P is the store-native payload type (e.g., json.RawMessage for SQL, bson.Raw for MongoDB).
 //
 // A Store represents a single entity type — one table or collection. The stream
 // parameter on each method identifies an instance within that type (e.g., a
@@ -33,14 +37,14 @@ import (
 //
 // Transaction support: pass a *sql.Tx or *mongo.Session via [WithTx] to have
 // operations participate in an external transaction.
-type Store[I comparable] interface {
+type Store[I comparable, P any] interface {
 	// Append adds entries to the named stream. Returns the IDs of newly appended entries.
 	// Entries with a non-empty DedupKey that already exists in the stream are silently skipped.
-	Append(ctx context.Context, stream string, entries ...RawEntry) ([]I, error)
+	Append(ctx context.Context, stream string, entries ...RawEntry[P]) ([]I, error)
 
 	// Read returns entries from the named stream, ordered by ID.
 	// Reading a non-existent stream returns nil, nil.
-	Read(ctx context.Context, stream string, opts ...ReadOption) ([]StoredEntry[I], error)
+	Read(ctx context.Context, stream string, opts ...ReadOption) ([]StoredEntry[I, P], error)
 
 	// Count returns the number of entries in the named stream.
 	Count(ctx context.Context, stream string) (int64, error)
@@ -78,8 +82,9 @@ type HealthChecker interface {
 }
 
 // RawEntry is an entry with an already-encoded payload, ready for storage.
-type RawEntry struct {
-	Payload       []byte            // Encoded payload bytes.
+// P is the store-native payload type.
+type RawEntry[P any] struct {
+	Payload       P                 // Encoded payload in the store's native format.
 	OrderKey      string            // Ordering key for filtering (e.g., aggregate ID).
 	DedupKey      string            // Deduplication key. Empty means no dedup.
 	SchemaVersion int               // Schema version of the payload.
@@ -88,10 +93,11 @@ type RawEntry struct {
 }
 
 // StoredEntry is a raw entry read back from the store, including its assigned ID and timestamp.
-type StoredEntry[I comparable] struct {
+// I is the store ID type; P is the store-native payload type.
+type StoredEntry[I comparable, P any] struct {
 	ID            I                 // Store-assigned unique ID.
 	Stream        string            // Stream name this entry belongs to.
-	Payload       []byte            // Encoded payload bytes.
+	Payload       P                 // Encoded payload in the store's native format.
 	OrderKey      string            // Ordering key.
 	DedupKey      string            // Deduplication key.
 	SchemaVersion int               // Schema version at write time.

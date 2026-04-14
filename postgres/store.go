@@ -31,8 +31,8 @@ type sqlExecutor interface {
 }
 
 var (
-	_ ledger.Store[int64]  = (*Store)(nil)
-	_ ledger.HealthChecker = (*Store)(nil)
+	_ ledger.Store[int64, json.RawMessage] = (*Store)(nil)
+	_ ledger.HealthChecker                 = (*Store)(nil)
 )
 
 // Store is a PostgreSQL ledger store.
@@ -136,7 +136,7 @@ func (s *Store) executor(ctx context.Context) sqlExecutor {
 }
 
 // Append adds entries to the named stream. Returns IDs of newly appended entries.
-func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.RawEntry) ([]int64, error) {
+func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.RawEntry[json.RawMessage]) ([]int64, error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
 	}
@@ -183,7 +183,7 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		tagsJSON, _ := json.Marshal(tags)
 
 		var id int64
-		err = stmt.QueryRowContext(ctx, stream, e.Payload, e.OrderKey, e.DedupKey, e.SchemaVersion, meta, tagsJSON).Scan(&id)
+		err = stmt.QueryRowContext(ctx, stream, []byte(e.Payload), e.OrderKey, e.DedupKey, e.SchemaVersion, meta, tagsJSON).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			s.logger.DebugContext(ctx, "dedup skip", "stream", stream, "dedup_key", e.DedupKey)
 			continue
@@ -203,7 +203,7 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 }
 
 // Read returns entries from the named stream.
-func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[int64], error) {
+func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[int64, json.RawMessage], error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
 	}
@@ -272,18 +272,20 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 	}
 	defer rows.Close()
 
-	var entries []ledger.StoredEntry[int64]
+	var entries []ledger.StoredEntry[int64, json.RawMessage]
 	for rows.Next() {
 		var (
-			e           ledger.StoredEntry[int64]
-			meta        []byte
-			tagsJSON    []byte
-			annotations []byte
-			updatedAt   sql.NullTime
+			e            ledger.StoredEntry[int64, json.RawMessage]
+			payloadBytes []byte
+			meta         []byte
+			tagsJSON     []byte
+			annotations  []byte
+			updatedAt    sql.NullTime
 		)
-		if err := rows.Scan(&e.ID, &e.Stream, &e.Payload, &e.OrderKey, &e.DedupKey, &e.SchemaVersion, &meta, &tagsJSON, &annotations, &e.CreatedAt, &updatedAt); err != nil {
+		if err := rows.Scan(&e.ID, &e.Stream, &payloadBytes, &e.OrderKey, &e.DedupKey, &e.SchemaVersion, &meta, &tagsJSON, &annotations, &e.CreatedAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("ledger/postgres: scan: %w", err)
 		}
+		e.Payload = json.RawMessage(payloadBytes)
 		if len(meta) > 0 {
 			e.Metadata, _ = decodeJSONB(meta)
 		}

@@ -5,21 +5,36 @@ package storetest
 import (
 	"context"
 	"errors"
+	"reflect"
 	"slices"
 	"testing"
 
 	"github.com/rbaliyan/ledger"
 )
 
+// TestConfig provides backend-specific test data for the conformance suite.
+type TestConfig[P any] struct {
+	// SamplePayload is a valid payload value for round-trip testing.
+	SamplePayload P
+	// PayloadEqual reports whether two payloads are equal.
+	// Defaults to reflect.DeepEqual if nil.
+	PayloadEqual func(a, b P) bool
+}
+
 // RunStoreTests runs the standard conformance suite against any Store implementation.
 // afterFn converts an ID to a ReadOption that sets the cursor.
-func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn func(I) ledger.ReadOption) {
+func RunStoreTests[I comparable, P any](t *testing.T, store ledger.Store[I, P], afterFn func(I) ledger.ReadOption, cfg TestConfig[P]) {
 	t.Helper()
 	ctx := context.Background()
 
+	payloadEqual := cfg.PayloadEqual
+	if payloadEqual == nil {
+		payloadEqual = func(a, b P) bool { return reflect.DeepEqual(a, b) }
+	}
+
 	t.Run("AppendAndRead", func(t *testing.T) {
-		ids, err := store.Append(ctx, "test-append", ledger.RawEntry{
-			Payload:       []byte(`{"id":"1"}`),
+		ids, err := store.Append(ctx, "test-append", ledger.RawEntry[P]{
+			Payload:       cfg.SamplePayload,
 			OrderKey:      "key-1",
 			DedupKey:      "dedup-1",
 			SchemaVersion: 1,
@@ -43,8 +58,8 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 		if e.Stream != "test-append" {
 			t.Errorf("Stream = %q", e.Stream)
 		}
-		if string(e.Payload) != `{"id":"1"}` {
-			t.Errorf("Payload = %s", e.Payload)
+		if !payloadEqual(e.Payload, cfg.SamplePayload) {
+			t.Errorf("Payload mismatch: got %v, want %v", e.Payload, cfg.SamplePayload)
 		}
 		if e.OrderKey != "key-1" {
 			t.Errorf("OrderKey = %q", e.OrderKey)
@@ -64,8 +79,8 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 	})
 
 	t.Run("DedupSkipsDuplicates", func(t *testing.T) {
-		entry := ledger.RawEntry{
-			Payload:       []byte(`{}`),
+		entry := ledger.RawEntry[P]{
+			Payload:       cfg.SamplePayload,
 			DedupKey:      "dup-test-1",
 			SchemaVersion: 1,
 		}
@@ -86,8 +101,8 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 	})
 
 	t.Run("DedupEmptyKeyAllowsDuplicates", func(t *testing.T) {
-		entry := ledger.RawEntry{
-			Payload:       []byte(`{}`),
+		entry := ledger.RawEntry[P]{
+			Payload:       cfg.SamplePayload,
 			DedupKey:      "",
 			SchemaVersion: 1,
 		}
@@ -99,8 +114,8 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 	})
 
 	t.Run("DedupAcrossStreams", func(t *testing.T) {
-		entry := ledger.RawEntry{
-			Payload:       []byte(`{}`),
+		entry := ledger.RawEntry[P]{
+			Payload:       cfg.SamplePayload,
 			DedupKey:      "cross-stream-key",
 			SchemaVersion: 1,
 		}
@@ -113,8 +128,8 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 
 	t.Run("CursorPagination", func(t *testing.T) {
 		for i := range 5 {
-			if _, err := store.Append(ctx, "test-cursor", ledger.RawEntry{
-				Payload:       []byte(`{}`),
+			if _, err := store.Append(ctx, "test-cursor", ledger.RawEntry[P]{
+				Payload:       cfg.SamplePayload,
 				SchemaVersion: 1,
 				OrderKey:      string(rune('a' + i)),
 			}); err != nil {
@@ -146,8 +161,8 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 
 	t.Run("Descending", func(t *testing.T) {
 		for i := range 3 {
-			if _, err := store.Append(ctx, "test-desc", ledger.RawEntry{
-				Payload:       []byte(`{}`),
+			if _, err := store.Append(ctx, "test-desc", ledger.RawEntry[P]{
+				Payload:       cfg.SamplePayload,
 				SchemaVersion: 1,
 			}); err != nil {
 				t.Fatalf("append %d: %v", i, err)
@@ -164,7 +179,7 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 
 	t.Run("OrderKeyFilter", func(t *testing.T) {
 		for _, key := range []string{"a", "b", "a"} {
-			if _, err := store.Append(ctx, "test-order", ledger.RawEntry{Payload: []byte(`{}`), OrderKey: key, SchemaVersion: 1}); err != nil {
+			if _, err := store.Append(ctx, "test-order", ledger.RawEntry[P]{Payload: cfg.SamplePayload, OrderKey: key, SchemaVersion: 1}); err != nil {
 				t.Fatalf("append: %v", err)
 			}
 		}
@@ -199,8 +214,8 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 	})
 
 	t.Run("SchemaVersion", func(t *testing.T) {
-		if _, err := store.Append(ctx, "test-schema", ledger.RawEntry{
-			Payload:       []byte(`{}`),
+		if _, err := store.Append(ctx, "test-schema", ledger.RawEntry[P]{
+			Payload:       cfg.SamplePayload,
 			SchemaVersion: 3,
 		}); err != nil {
 			t.Fatalf("append: %v", err)
@@ -218,10 +233,10 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 	})
 
 	t.Run("StreamIsolation", func(t *testing.T) {
-		if _, err := store.Append(ctx, "test-iso-a", ledger.RawEntry{Payload: []byte(`{}`), SchemaVersion: 1}); err != nil {
+		if _, err := store.Append(ctx, "test-iso-a", ledger.RawEntry[P]{Payload: cfg.SamplePayload, SchemaVersion: 1}); err != nil {
 			t.Fatalf("append a: %v", err)
 		}
-		if _, err := store.Append(ctx, "test-iso-b", ledger.RawEntry{Payload: []byte(`{}`), SchemaVersion: 1}); err != nil {
+		if _, err := store.Append(ctx, "test-iso-b", ledger.RawEntry[P]{Payload: cfg.SamplePayload, SchemaVersion: 1}); err != nil {
 			t.Fatalf("append b: %v", err)
 		}
 
@@ -234,7 +249,7 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 
 	t.Run("Count", func(t *testing.T) {
 		for range 3 {
-			store.Append(ctx, "test-count", ledger.RawEntry{Payload: []byte(`{}`), SchemaVersion: 1})
+			store.Append(ctx, "test-count", ledger.RawEntry[P]{Payload: cfg.SamplePayload, SchemaVersion: 1})
 		}
 		n, err := store.Count(ctx, "test-count")
 		if err != nil {
@@ -258,7 +273,7 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 	t.Run("Trim", func(t *testing.T) {
 		var lastID I
 		for range 5 {
-			ids, _ := store.Append(ctx, "test-trim", ledger.RawEntry{Payload: []byte(`{}`), SchemaVersion: 1})
+			ids, _ := store.Append(ctx, "test-trim", ledger.RawEntry[P]{Payload: cfg.SamplePayload, SchemaVersion: 1})
 			if len(ids) > 0 {
 				lastID = ids[0]
 			}
@@ -284,8 +299,8 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 	})
 
 	t.Run("SetTags", func(t *testing.T) {
-		ids, err := store.Append(ctx, "test-tags", ledger.RawEntry{
-			Payload: []byte(`{}`), SchemaVersion: 1, Tags: []string{"initial"},
+		ids, err := store.Append(ctx, "test-tags", ledger.RawEntry[P]{
+			Payload: cfg.SamplePayload, SchemaVersion: 1, Tags: []string{"initial"},
 		})
 		if err != nil {
 			t.Fatalf("append: %v", err)
@@ -313,8 +328,8 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 	})
 
 	t.Run("SetAnnotations", func(t *testing.T) {
-		ids, err := store.Append(ctx, "test-annot", ledger.RawEntry{
-			Payload: []byte(`{}`), SchemaVersion: 1,
+		ids, err := store.Append(ctx, "test-annot", ledger.RawEntry[P]{
+			Payload: cfg.SamplePayload, SchemaVersion: 1,
 		})
 		if err != nil {
 			t.Fatalf("append: %v", err)
@@ -368,8 +383,8 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 
 	t.Run("WithTagFilter", func(t *testing.T) {
 		for _, tag := range []string{"a", "b"} {
-			if _, err := store.Append(ctx, "test-tag-filter", ledger.RawEntry{
-				Payload: []byte(`{}`), SchemaVersion: 1, Tags: []string{tag, "common"},
+			if _, err := store.Append(ctx, "test-tag-filter", ledger.RawEntry[P]{
+				Payload: cfg.SamplePayload, SchemaVersion: 1, Tags: []string{tag, "common"},
 			}); err != nil {
 				t.Fatalf("append: %v", err)
 			}
@@ -410,7 +425,7 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 	t.Run("ListStreamIDs", func(t *testing.T) {
 		names := []string{listPrefix + "alpha", listPrefix + "beta", listPrefix + "gamma"}
 		for _, name := range names {
-			if _, err := store.Append(ctx, name, ledger.RawEntry{Payload: []byte(`{}`), SchemaVersion: 1}); err != nil {
+			if _, err := store.Append(ctx, name, ledger.RawEntry[P]{Payload: cfg.SamplePayload, SchemaVersion: 1}); err != nil {
 				t.Fatalf("append %s: %v", name, err)
 			}
 		}
@@ -442,7 +457,7 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 		const pagePrefix = "zzz-page-"
 		names := []string{pagePrefix + "a", pagePrefix + "b", pagePrefix + "c", pagePrefix + "d", pagePrefix + "e"}
 		for _, name := range names {
-			if _, err := store.Append(ctx, name, ledger.RawEntry{Payload: []byte(`{}`), SchemaVersion: 1}); err != nil {
+			if _, err := store.Append(ctx, name, ledger.RawEntry[P]{Payload: cfg.SamplePayload, SchemaVersion: 1}); err != nil {
 				t.Fatalf("append %s: %v", name, err)
 			}
 		}
@@ -474,7 +489,7 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 
 	t.Run("ListStreamIDs_TrimmedExcluded", func(t *testing.T) {
 		const name = "zzz-trimmed-out"
-		ids, err := store.Append(ctx, name, ledger.RawEntry{Payload: []byte(`{}`), SchemaVersion: 1})
+		ids, err := store.Append(ctx, name, ledger.RawEntry[P]{Payload: cfg.SamplePayload, SchemaVersion: 1})
 		if err != nil {
 			t.Fatalf("append: %v", err)
 		}
@@ -518,4 +533,3 @@ func RunStoreTests[I comparable](t *testing.T, store ledger.Store[I], afterFn fu
 		}
 	})
 }
-
