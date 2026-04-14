@@ -1,0 +1,244 @@
+syntax = "proto3";
+
+package ledger.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/rbaliyan/ledger/api/ledger/v1;ledgerv1";
+
+// LedgerService exposes the append-only log operations over gRPC.
+//
+// A server instance is bound to exactly one store (table / collection).
+// Within that store, streams are identified by the "stream" field in each request.
+service LedgerService {
+  // Append adds entries to the named stream.
+  // Entries whose DedupKey already exists in the stream are silently skipped.
+  // Returns the IDs assigned to newly written entries (skipped entries are omitted).
+  rpc Append(AppendRequest) returns (AppendResponse);
+
+  // Read returns entries from the named stream, ordered by ID.
+  // An empty stream returns an empty list (not an error).
+  rpc Read(ReadRequest) returns (ReadResponse);
+
+  // Count returns the total number of entries in the named stream.
+  rpc Count(CountRequest) returns (CountResponse);
+
+  // SetTags replaces all tags on an existing entry.
+  // Returns NOT_FOUND if the entry does not exist.
+  rpc SetTags(SetTagsRequest) returns (SetTagsResponse);
+
+  // SetAnnotations merges key-value annotations onto an existing entry.
+  // Keys present in "set" are upserted; keys present in "delete" are removed.
+  // Returns NOT_FOUND if the entry does not exist.
+  rpc SetAnnotations(SetAnnotationsRequest) returns (SetAnnotationsResponse);
+
+  // Trim deletes entries whose ID is less than or equal to before_id.
+  // Returns the number of entries deleted.
+  rpc Trim(TrimRequest) returns (TrimResponse);
+
+  // ListStreamIDs returns distinct stream IDs that have at least one entry.
+  // Streams that have been fully trimmed are not returned.
+  // Results are ascending by stream ID and cursor-paginated via after / limit.
+  rpc ListStreamIDs(ListStreamIDsRequest) returns (ListStreamIDsResponse);
+
+  // Health reports backend connectivity. Returns status "ok" on success,
+  // or a description of the problem on failure.
+  rpc Health(HealthRequest) returns (HealthResponse);
+}
+
+// ─── shared types ────────────────────────────────────────────────────────────
+
+// EntryInput describes a single entry to be appended.
+message EntryInput {
+  // payload is the raw serialised payload bytes (JSON, protobuf, etc.).
+  // The server stores it verbatim; no re-encoding is performed.
+  bytes payload = 1;
+
+  // order_key is an optional secondary ordering key used for filtering
+  // (e.g., an aggregate ID or category string).
+  string order_key = 2;
+
+  // dedup_key enables idempotent appends. If a non-empty key already exists
+  // in the stream the entry is silently skipped. Empty means no dedup.
+  string dedup_key = 3;
+
+  // schema_version is stamped on the entry at write time. Defaults to 1.
+  int64 schema_version = 4;
+
+  // metadata is immutable key-value data set at append time
+  // (e.g., trace_id, source, tenant_id).
+  map<string, string> metadata = 5;
+
+  // tags is the initial set of mutable labels on the entry.
+  repeated string tags = 6;
+}
+
+// Entry is a stored ledger entry returned by Read.
+message Entry {
+  // id is the store-assigned unique identifier (decimal int64 for SQL backends,
+  // hex ObjectID string for MongoDB).
+  string id = 1;
+
+  // stream is the stream this entry belongs to.
+  string stream = 2;
+
+  // payload is the raw serialised payload as stored (see EntryInput.payload).
+  bytes payload = 3;
+
+  string order_key = 4;
+  string dedup_key = 5;
+
+  // schema_version is the version stamped at write time.
+  int64 schema_version = 6;
+
+  // metadata is the immutable key-value data set at append time.
+  map<string, string> metadata = 7;
+
+  // tags are the current mutable labels on the entry.
+  repeated string tags = 8;
+
+  // annotations are the current mutable key-value state on the entry.
+  map<string, string> annotations = 9;
+
+  // created_at is the timestamp when the entry was stored.
+  google.protobuf.Timestamp created_at = 10;
+
+  // updated_at is the timestamp of the last tag or annotation update,
+  // absent if the entry has never been mutated.
+  google.protobuf.Timestamp updated_at = 11;
+}
+
+// ReadOptions configures how entries are fetched from a stream.
+// All fields are optional; zero values mean "use the backend default".
+message ReadOptions {
+  // after is the cursor: only entries whose ID is strictly greater than this
+  // value are returned. Empty string means "from the beginning".
+  string after = 1;
+
+  // limit caps the number of entries returned. 0 means the backend default (100).
+  int64 limit = 2;
+
+  // desc returns entries newest-first (descending by ID) when true.
+  bool desc = 3;
+
+  // order_key filters entries by their order_key field.
+  string order_key = 4;
+
+  // tag filters entries that carry this single tag.
+  string tag = 5;
+
+  // all_tags filters entries that carry ALL of the specified tags.
+  repeated string all_tags = 6;
+}
+
+// ─── Append ──────────────────────────────────────────────────────────────────
+
+message AppendRequest {
+  // stream is the stream to append to. Must not be empty.
+  string stream = 1;
+
+  // entries is the batch of entries to append. An empty batch is a no-op.
+  repeated EntryInput entries = 2;
+}
+
+message AppendResponse {
+  // ids are the store-assigned IDs for entries that were successfully written.
+  // Deduplicated (skipped) entries are absent from this list.
+  // The order matches the order of non-skipped entries in the request.
+  repeated string ids = 1;
+}
+
+// ─── Read ─────────────────────────────────────────────────────────────────────
+
+message ReadRequest {
+  // stream is the stream to read from. Must not be empty.
+  string stream = 1;
+
+  // options configures filtering, ordering, and pagination.
+  ReadOptions options = 2;
+}
+
+message ReadResponse {
+  repeated Entry entries = 1;
+}
+
+// ─── Count ───────────────────────────────────────────────────────────────────
+
+message CountRequest {
+  string stream = 1;
+}
+
+message CountResponse {
+  int64 count = 1;
+}
+
+// ─── SetTags ─────────────────────────────────────────────────────────────────
+
+message SetTagsRequest {
+  string stream = 1;
+
+  // id is the entry ID as returned by Append or Read.
+  string id = 2;
+
+  // tags replaces the entire tag list on the entry.
+  repeated string tags = 3;
+}
+
+message SetTagsResponse {}
+
+// ─── SetAnnotations ──────────────────────────────────────────────────────────
+
+message SetAnnotationsRequest {
+  string stream = 1;
+
+  // id is the entry ID as returned by Append or Read.
+  string id = 2;
+
+  // set contains key-value pairs to upsert onto the entry's annotations.
+  map<string, string> set = 3;
+
+  // delete lists annotation keys to remove from the entry.
+  repeated string delete = 4;
+}
+
+message SetAnnotationsResponse {}
+
+// ─── Trim ─────────────────────────────────────────────────────────────────────
+
+message TrimRequest {
+  string stream = 1;
+
+  // before_id — all entries whose ID is less than or equal to this value
+  // are deleted from the stream.
+  string before_id = 2;
+}
+
+message TrimResponse {
+  // deleted is the number of entries that were removed.
+  int64 deleted = 1;
+}
+
+// ─── ListStreamIDs ────────────────────────────────────────────────────────────
+
+message ListStreamIDsRequest {
+  // after is the cursor: only stream IDs strictly greater than this value
+  // are returned. Empty string means "from the beginning".
+  string after = 1;
+
+  // limit caps the number of IDs returned. 0 means the backend default (100).
+  int64 limit = 2;
+}
+
+message ListStreamIDsResponse {
+  // stream_ids is the ordered list of distinct stream IDs with at least one entry.
+  repeated string stream_ids = 1;
+}
+
+// ─── Health ──────────────────────────────────────────────────────────────────
+
+message HealthRequest {}
+
+message HealthResponse {
+  // status is "ok" when the backend is reachable, or an error description otherwise.
+  string status = 1;
+}
