@@ -7,36 +7,42 @@ import (
 )
 
 // Upcaster transforms payload data from one schema version to the next.
+// P is the store-native payload type (e.g. json.RawMessage for SQL backends,
+// bson.Raw for MongoDB).
 //
 // Register upcasters in sequence (v1→v2, v2→v3, etc.) to allow chained upgrades.
 // When reading entries written with an older schema version, the stream applies
-// upcasters in order to transform the raw bytes before decoding into T.
-type Upcaster interface {
+// upcasters in order to transform the payload before decoding into T.
+type Upcaster[P any] interface {
 	// FromVersion returns the source version this upcaster handles.
 	FromVersion() int
 
 	// ToVersion returns the target version this upcaster produces.
 	ToVersion() int
 
-	// Upcast transforms the data from source to target version.
-	Upcast(ctx context.Context, data []byte) ([]byte, error)
+	// Upcast transforms the payload from source to target version.
+	Upcast(ctx context.Context, payload P) (P, error)
 }
 
-// UpcasterFunc creates an Upcaster from a simple function.
-func UpcasterFunc(from, to int, fn func(ctx context.Context, data []byte) ([]byte, error)) Upcaster {
-	return &funcUpcaster{from: from, to: to, fn: fn}
+// UpcasterFunc creates an Upcaster[P] from a plain function.
+func UpcasterFunc[P any](from, to int, fn func(ctx context.Context, payload P) (P, error)) Upcaster[P] {
+	return &funcUpcaster[P]{from: from, to: to, fn: fn}
 }
 
-type funcUpcaster struct {
+type funcUpcaster[P any] struct {
 	from, to int
-	fn       func(ctx context.Context, data []byte) ([]byte, error)
+	fn       func(ctx context.Context, payload P) (P, error)
 }
 
-func (u *funcUpcaster) FromVersion() int                                    { return u.from }
-func (u *funcUpcaster) ToVersion() int                                      { return u.to }
-func (u *funcUpcaster) Upcast(ctx context.Context, data []byte) ([]byte, error) { return u.fn(ctx, data) }
+func (u *funcUpcaster[P]) FromVersion() int { return u.from }
+func (u *funcUpcaster[P]) ToVersion() int   { return u.to }
+func (u *funcUpcaster[P]) Upcast(ctx context.Context, payload P) (P, error) {
+	return u.fn(ctx, payload)
+}
 
-// FieldMapper transforms payloads between schema versions using field operations.
+// FieldMapper transforms JSON payloads between schema versions using field operations.
+// It implements [Upcaster][json.RawMessage] and is intended for use with SQL backends
+// (sqlite, postgres). MongoDB users should write BSON-aware upcasters instead.
 //
 // Supports three operations applied in order: renames, then defaults, then removals.
 //
@@ -86,9 +92,9 @@ func (f *FieldMapper) RemoveField(field string) *FieldMapper {
 	return f
 }
 
-// Upcast transforms the data from source to target version.
+// Upcast transforms the JSON payload from source to target version.
 // Applies operations in order: renames, defaults, removals.
-func (f *FieldMapper) Upcast(ctx context.Context, data []byte) ([]byte, error) {
+func (f *FieldMapper) Upcast(ctx context.Context, data json.RawMessage) (json.RawMessage, error) {
 	var m map[string]any
 	if err := json.Unmarshal(data, &m); err != nil {
 		return nil, fmt.Errorf("unmarshal: %w", err)
@@ -117,31 +123,33 @@ func (f *FieldMapper) Upcast(ctx context.Context, data []byte) ([]byte, error) {
 	return json.Marshal(m)
 }
 
-var _ Upcaster = (*FieldMapper)(nil)
-var _ Upcaster = (*funcUpcaster)(nil)
+var _ Upcaster[json.RawMessage] = (*FieldMapper)(nil)
+var _ Upcaster[json.RawMessage] = (*funcUpcaster[json.RawMessage])(nil)
 
 // upcastChain applies upcasters in sequence from fromVersion to targetVersion.
-func upcastChain(ctx context.Context, data []byte, fromVersion, targetVersion int, upcasters []Upcaster) ([]byte, error) {
+func upcastChain[P any](ctx context.Context, payload P, fromVersion, targetVersion int, upcasters []Upcaster[P]) (P, error) {
 	if fromVersion >= targetVersion {
-		return data, nil
+		return payload, nil
 	}
 
-	result := data
+	result := payload
 	for v := fromVersion; v < targetVersion; v++ {
 		u := findUpcaster(upcasters, v, v+1)
 		if u == nil {
-			return nil, fmt.Errorf("%w: version %d to %d", ErrNoUpcaster, v, v+1)
+			var zero P
+			return zero, fmt.Errorf("%w: version %d to %d", ErrNoUpcaster, v, v+1)
 		}
 		var err error
 		result, err = u.Upcast(ctx, result)
 		if err != nil {
-			return nil, fmt.Errorf("upcast v%d to v%d: %w", v, v+1, err)
+			var zero P
+			return zero, fmt.Errorf("upcast v%d to v%d: %w", v, v+1, err)
 		}
 	}
 	return result, nil
 }
 
-func findUpcaster(upcasters []Upcaster, from, to int) Upcaster {
+func findUpcaster[P any](upcasters []Upcaster[P], from, to int) Upcaster[P] {
 	for _, u := range upcasters {
 		if u.FromVersion() == from && u.ToVersion() == to {
 			return u

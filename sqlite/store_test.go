@@ -39,7 +39,9 @@ func newTestStore(t *testing.T) *sqlite.Store {
 
 func TestConformance(t *testing.T) {
 	store := newTestStore(t)
-	storetest.RunStoreTests(t, store, ledger.After[int64])
+	storetest.RunStoreTests(t, store, ledger.After[int64], storetest.TestConfig[json.RawMessage]{
+		SamplePayload: json.RawMessage(`{}`),
+	})
 }
 
 func TestNew_InvalidTableName(t *testing.T) {
@@ -62,7 +64,7 @@ func TestClosedStoreErrors(t *testing.T) {
 	ctx := context.Background()
 	store.Close(ctx)
 
-	_, err := store.Append(ctx, "stream", ledger.RawEntry{Payload: []byte(`{}`)})
+	_, err := store.Append(ctx, "stream", ledger.RawEntry[json.RawMessage]{Payload: json.RawMessage(`{}`)})
 	if !errors.Is(err, ledger.ErrStoreClosed) {
 		t.Errorf("Append on closed: %v, want ErrStoreClosed", err)
 	}
@@ -129,10 +131,10 @@ func TestCrossStoreIsolation(t *testing.T) {
 	t.Cleanup(func() { users.Close(ctx) })
 
 	// Append to each store with the same stream instance name.
-	if _, err := orders.Append(ctx, "alice", ledger.RawEntry{Payload: []byte(`"order"`), SchemaVersion: 1}); err != nil {
+	if _, err := orders.Append(ctx, "alice", ledger.RawEntry[json.RawMessage]{Payload: json.RawMessage(`"order"`), SchemaVersion: 1}); err != nil {
 		t.Fatalf("append orders: %v", err)
 	}
-	if _, err := users.Append(ctx, "alice", ledger.RawEntry{Payload: []byte(`"user"`), SchemaVersion: 1}); err != nil {
+	if _, err := users.Append(ctx, "alice", ledger.RawEntry[json.RawMessage]{Payload: json.RawMessage(`"user"`), SchemaVersion: 1}); err != nil {
 		t.Fatalf("append users: %v", err)
 	}
 
@@ -174,7 +176,7 @@ func TestStreamTypedAppendAndRead(t *testing.T) {
 		Amount float64 `json:"amount"`
 	}
 
-	s := ledger.NewStream[int64, Order](store, "orders")
+	s := ledger.NewStream(store, "orders", ledger.JSONCodec[Order]{})
 
 	ids, err := s.Append(ctx, ledger.AppendInput[Order]{
 		Payload:  Order{ID: "o-1", Amount: 99.99},
@@ -215,8 +217,8 @@ func TestStreamSchemaUpcast(t *testing.T) {
 		"customer_name": "John",
 		"amount":        42,
 	})
-	store.Append(ctx, "orders", ledger.RawEntry{
-		Payload:       v1Payload,
+	store.Append(ctx, "orders", ledger.RawEntry[json.RawMessage]{
+		Payload:       json.RawMessage(v1Payload),
 		SchemaVersion: 1,
 	})
 
@@ -226,8 +228,8 @@ func TestStreamSchemaUpcast(t *testing.T) {
 		Amount float64 `json:"amount"`
 	}
 
-	s := ledger.NewStream[int64, OrderV2](store, "orders",
-		ledger.WithSchemaVersion(2),
+	s := ledger.NewStream(store, "orders", ledger.JSONCodec[OrderV2]{},
+		ledger.WithSchemaVersion[json.RawMessage](2),
 		ledger.WithUpcaster(ledger.NewFieldMapper(1, 2).
 			RenameField("customer_name", "name").
 			AddDefault("email", "unknown@example.com")),
@@ -270,8 +272,8 @@ func TestWithTx_Commit(t *testing.T) {
 	}
 	txCtx := ledger.WithTx(ctx, tx)
 
-	ids, err := store.Append(txCtx, "tx-test", ledger.RawEntry{
-		Payload:       []byte(`{"txn":"commit"}`),
+	ids, err := store.Append(txCtx, "tx-test", ledger.RawEntry[json.RawMessage]{
+		Payload:       json.RawMessage(`{"txn":"commit"}`),
 		SchemaVersion: 1,
 	})
 	if err != nil {
@@ -321,8 +323,8 @@ func TestWithTx_Rollback(t *testing.T) {
 	}
 	txCtx := ledger.WithTx(ctx, tx)
 
-	_, err = store.Append(txCtx, "tx-rollback", ledger.RawEntry{
-		Payload:       []byte(`{"txn":"rollback"}`),
+	_, err = store.Append(txCtx, "tx-rollback", ledger.RawEntry[json.RawMessage]{
+		Payload:       json.RawMessage(`{"txn":"rollback"}`),
 		SchemaVersion: 1,
 	})
 	if err != nil {

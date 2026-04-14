@@ -1,6 +1,9 @@
 package ledger
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func FuzzValidateName(f *testing.F) {
 	f.Add("ledger_entries")
@@ -26,19 +29,19 @@ func FuzzJSONCodecRoundTrip(f *testing.F) {
 	f.Add([]byte(`"hello"`))
 	f.Add([]byte(`[1,2,3]`))
 
-	codec := JSONCodec{}
+	codec := JSONCodec[any]{}
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var v any
-		if err := codec.Decode(data, &v); err != nil {
+		if err := codec.Unmarshal(json.RawMessage(data), &v); err != nil {
 			return // invalid JSON, skip
 		}
-		encoded, err := codec.Encode(v)
+		encoded, err := codec.Marshal(v)
 		if err != nil {
-			t.Fatalf("Encode after Decode: %v", err)
+			t.Fatalf("Marshal after Unmarshal: %v", err)
 		}
 		var v2 any
-		if err := codec.Decode(encoded, &v2); err != nil {
-			t.Fatalf("Decode after Encode: %v", err)
+		if err := codec.Unmarshal(encoded, &v2); err != nil {
+			t.Fatalf("Unmarshal after Marshal: %v", err)
 		}
 	})
 }
