@@ -81,6 +81,23 @@ type HealthChecker interface {
 	Health(ctx context.Context) error
 }
 
+// CursorStore is an optional interface that Store implementations may provide
+// to persist bridge progress durably alongside their data.
+// The cursor is a string-encoded store ID tracking how far the Bridge has consumed
+// the source mutation log. SetCursor must be monotonic — it should not regress
+// a cursor that was already advanced by another Bridge instance.
+type CursorStore interface {
+	GetCursor(ctx context.Context, name string) (string, bool, error)
+	SetCursor(ctx context.Context, name string, cursor string) error
+}
+
+// SourceIDLookup is an optional interface that Store implementations may provide
+// to resolve a sink entry ID from its source entry ID.
+// Used by the Bridge to apply SetTags, SetAnnotations, and Trim mutations.
+type SourceIDLookup[I comparable] interface {
+	FindBySourceID(ctx context.Context, stream, sourceID string) (I, bool, error)
+}
+
 // RawEntry is an entry with an already-encoded payload, ready for storage.
 // P is the store-native payload type.
 type RawEntry[P any] struct {
@@ -90,6 +107,7 @@ type RawEntry[P any] struct {
 	SchemaVersion int               // Schema version of the payload.
 	Metadata      map[string]string // Arbitrary immutable key-value metadata.
 	Tags          []string          // Initial tags (mutable after append via SetTags).
+	SourceID      string            // Source entry ID set by bridge.Bridge during replication. Empty for native writes.
 }
 
 // StoredEntry is a raw entry read back from the store, including its assigned ID and timestamp.

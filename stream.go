@@ -84,15 +84,18 @@ type Stream[I comparable, P any, T any] struct {
 // codec is required and must not be nil. For SQL backends use [JSONCodec];
 // for MongoDB use the BSONCodec provided by the mongodb package.
 //
-// Panics if store is nil.
+// Returns an error if store or codec is nil.
 func NewStream[I comparable, P any, T any](
 	store Store[I, P],
 	id string,
 	codec PayloadCodec[T, P],
 	opts ...Option[P],
-) Stream[I, P, T] {
+) (Stream[I, P, T], error) {
 	if store == nil {
-		panic("ledger: NewStream called with nil store")
+		return Stream[I, P, T]{}, fmt.Errorf("ledger: NewStream called with nil store")
+	}
+	if codec == nil {
+		return Stream[I, P, T]{}, fmt.Errorf("ledger: NewStream called with nil codec")
 	}
 	o := options[P]{
 		schemaVersion: 1,
@@ -106,7 +109,7 @@ func NewStream[I comparable, P any, T any](
 		codec:         codec,
 		schemaVersion: o.schemaVersion,
 		upcasters:     o.upcasters,
-	}
+	}, nil
 }
 
 // ID returns the stream instance ID within the store's type.

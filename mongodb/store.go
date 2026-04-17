@@ -15,20 +15,25 @@ package mongodb
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
 
 	"github.com/rbaliyan/ledger"
+	internalReplication "github.com/rbaliyan/ledger/internal/replication"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	mongoopts "go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 var (
 	_ ledger.Store[string, bson.Raw] = (*Store)(nil)
 	_ ledger.HealthChecker           = (*Store)(nil)
+	_ ledger.CursorStore             = (*Store)(nil)
+	_ ledger.SourceIDLookup[string]  = (*Store)(nil)
 )
 
 type entry struct {
@@ -41,34 +46,60 @@ type entry struct {
 	Metadata      map[string]string `bson:"metadata,omitempty"`
 	Tags          []string          `bson:"tags"`
 	Annotations   map[string]string `bson:"annotations,omitempty"`
+	SourceID      string            `bson:"source_id,omitempty"`
 	CreatedAt     time.Time         `bson:"created_at"`
 	UpdatedAt     *time.Time        `bson:"updated_at,omitempty"`
 }
 
 // Store is a MongoDB ledger store.
 type Store struct {
-	db     *mongo.Database
-	coll   *mongo.Collection
-	logger *slog.Logger
-	closed atomic.Bool
+	db          *mongo.Database
+	coll        *mongo.Collection
+	cursors     *mongo.Collection
+	mutationLog ledger.Store[string, json.RawMessage]
+	logger      *slog.Logger
+	closed      atomic.Bool
+	appendOnly  bool
 }
 
 // Option configures the MongoDB store.
-type Option func(*storeOptions)
+type Option func(*options)
 
-type storeOptions struct {
-	collection string
-	logger     *slog.Logger
+type options struct {
+	collection  string
+	logger      *slog.Logger
+	mutationLog ledger.Store[string, json.RawMessage]
+	appendOnly  bool
 }
 
 // WithCollection sets the collection name. Defaults to "ledger_entries".
 func WithCollection(name string) Option {
-	return func(o *storeOptions) { o.collection = name }
+	return func(o *options) { o.collection = name }
 }
 
 // WithLogger sets the structured logger. Defaults to slog.Default().
 func WithLogger(l *slog.Logger) Option {
-	return func(o *storeOptions) { o.logger = l }
+	return func(o *options) { o.logger = l }
+}
+
+// WithAppendOnly disables SetTags and SetAnnotations, returning [ledger.ErrNotSupported].
+// Use this when the replication sink (e.g. ClickHouse) does not support entry mutations.
+func WithAppendOnly() Option {
+	return func(o *options) { o.appendOnly = true }
+}
+
+// WithMutationLog enables mutation logging. Every successful write
+// (Append, SetTags, SetAnnotations, Trim) is recorded as a JSON event in the
+// mutation log so a [bridge.Bridge] can apply it to a sink store.
+//
+// Use [NewJSONStore] in the same MongoDB database to keep everything in one
+// cluster. Mutation log writes share the session from [ledger.WithTx], so on
+// replica-set clusters you can make them atomic by wrapping calls in a
+// multi-document transaction. Without a transaction the writes are best-effort:
+// a crash between the main write and the mutation log write will lose that
+// event (the main data is still durable).
+func WithMutationLog(mutLog ledger.Store[string, json.RawMessage]) Option {
+	return func(o *options) { o.mutationLog = mutLog }
 }
 
 // New creates a new MongoDB ledger store. Indexes are created automatically.
@@ -77,7 +108,7 @@ func New(ctx context.Context, db *mongo.Database, opts ...Option) (*Store, error
 	if db == nil {
 		return nil, fmt.Errorf("ledger/mongodb: db must not be nil")
 	}
-	o := storeOptions{collection: "ledger_entries", logger: slog.Default()}
+	o := options{collection: "ledger_entries", logger: slog.Default()}
 	for _, fn := range opts {
 		fn(&o)
 	}
@@ -86,7 +117,8 @@ func New(ctx context.Context, db *mongo.Database, opts ...Option) (*Store, error
 	}
 
 	coll := db.Collection(o.collection)
-	s := &Store{db: db, coll: coll, logger: o.logger}
+	cursors := db.Collection(o.collection + "_cursors")
+	s := &Store{db: db, coll: coll, cursors: cursors, mutationLog: o.mutationLog, logger: o.logger, appendOnly: o.appendOnly}
 	if err := s.ensureIndexes(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/mongodb: ensure indexes: %w", err)
 	}
@@ -100,13 +132,17 @@ func (s *Store) ensureIndexes(ctx context.Context) error {
 		{Keys: bson.D{{Key: "stream", Value: 1}, {Key: "order_key", Value: 1}, {Key: "_id", Value: 1}}},
 		{
 			Keys: bson.D{{Key: "stream", Value: 1}, {Key: "dedup_key", Value: 1}},
-			Options: options.Index().
+			Options: mongoopts.Index().
 				SetUnique(true).
 				SetPartialFilterExpression(bson.D{{Key: "dedup_key", Value: bson.D{{Key: "$gt", Value: ""}}}}),
 		},
 		// Single-field stream index supports DISTINCT_SCAN plan for ListStreamIDs;
 		// cheap to maintain due to low cardinality of stream values.
 		{Keys: bson.D{{Key: "stream", Value: 1}}},
+		{
+			Keys:    bson.D{{Key: "source_id", Value: 1}},
+			Options: mongoopts.Index().SetSparse(true).SetUnique(true),
+		},
 	}
 	_, err := s.coll.Indexes().CreateMany(ctx, models)
 	return err
@@ -122,6 +158,27 @@ func (s *Store) createAsyncIndexes(logger *slog.Logger) {
 	}
 	if _, err := s.coll.Indexes().CreateOne(context.Background(), model); err != nil && !s.closed.Load() {
 		logger.Warn("failed to create tags index", "error", err)
+	}
+}
+
+// bsonToJSON converts a BSON document to relaxed Extended JSON so it can be
+// stored in the mutation log and consumed by JSON-native sinks (e.g. ClickHouse).
+// Relaxed mode produces natural JSON numbers instead of $numberInt/$numberLong wrappers.
+func bsonToJSON(raw bson.Raw) (json.RawMessage, error) {
+	b, err := bson.MarshalExtJSON(raw, false, false)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(b), nil
+}
+
+// writeMutationEvent appends a mutation event to the mutation log.
+// Failures are logged as warnings; the main operation has already committed.
+func (s *Store) writeMutationEvent(ctx context.Context, evt internalReplication.Event) {
+	data, _ := json.Marshal(evt)
+	if _, err := s.mutationLog.Append(ctx, internalReplication.MutationStream,
+		ledger.RawEntry[json.RawMessage]{Payload: data, SchemaVersion: 1}); err != nil {
+		s.logger.WarnContext(ctx, "mutation log write failed", "error", err, "type", evt.Type, "stream", evt.Stream)
 	}
 }
 
@@ -158,25 +215,27 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 			SchemaVersion: e.SchemaVersion,
 			Metadata:      e.Metadata,
 			Tags:          tags,
+			SourceID:      e.SourceID,
 			CreatedAt:     now,
 		}
 	}
 
-	insertOpts := options.InsertMany().SetOrdered(false)
+	insertOpts := mongoopts.InsertMany().SetOrdered(false)
 	_, err := s.coll.InsertMany(ctx, docs, insertOpts)
 
 	failed := make(map[int]struct{})
+	var appendErr error
 	if err != nil {
-		bwe, ok := err.(mongo.BulkWriteException)
-		if !ok {
+		var bwe mongo.BulkWriteException
+		if !errors.As(err, &bwe) {
 			return nil, fmt.Errorf("ledger/mongodb: insert many: %w", err)
 		}
 		for _, we := range bwe.WriteErrors {
+			failed[we.Index] = struct{}{}
 			if we.HasErrorCode(11000) {
-				failed[we.Index] = struct{}{}
 				s.logger.DebugContext(ctx, "dedup skip", "stream", stream, "index", we.Index)
 			} else {
-				return nil, fmt.Errorf("ledger/mongodb: insert at index %d: %w", we.Index, err)
+				appendErr = errors.Join(appendErr, fmt.Errorf("ledger/mongodb: insert at index %d code=%d: %s", we.Index, we.Code, we.Message))
 			}
 		}
 	}
@@ -187,7 +246,38 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 			ids = append(ids, doc.ID.Hex())
 		}
 	}
-	return ids, nil
+
+	if s.mutationLog != nil && len(ids) > 0 {
+		evtEntries := make([]internalReplication.EventEntry, 0, len(ids))
+		for i, doc := range docs {
+			if _, skip := failed[i]; skip {
+				continue
+			}
+			payload, err := bsonToJSON(doc.Payload)
+			if err != nil {
+				s.logger.WarnContext(ctx, "mutation log: bson→json transcode failed", "error", err, "stream", stream)
+				continue
+			}
+			evtEntries = append(evtEntries, internalReplication.EventEntry{
+				ID:            doc.ID.Hex(),
+				Payload:       payload,
+				OrderKey:      doc.OrderKey,
+				DedupKey:      doc.DedupKey,
+				SchemaVersion: doc.SchemaVersion,
+				Metadata:      doc.Metadata,
+				Tags:          doc.Tags,
+			})
+		}
+		if len(evtEntries) > 0 {
+			s.writeMutationEvent(ctx, internalReplication.Event{
+				Type:    internalReplication.TypeAppend,
+				Stream:  stream,
+				Entries: evtEntries,
+			})
+		}
+	}
+
+	return ids, appendErr
 }
 
 // Read returns entries from the named stream.
@@ -233,7 +323,7 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 		sortDir = -1
 	}
 
-	findOpts := options.Find().
+	findOpts := mongoopts.Find().
 		SetSort(bson.D{{Key: "_id", Value: sortDir}}).
 		SetLimit(int64(o.Limit()))
 
@@ -287,6 +377,9 @@ func (s *Store) SetTags(ctx context.Context, stream string, id string, tags []st
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
 	}
+	if s.appendOnly {
+		return ledger.ErrNotSupported
+	}
 	if tags == nil {
 		tags = []string{}
 	}
@@ -306,6 +399,14 @@ func (s *Store) SetTags(ctx context.Context, stream string, id string, tags []st
 	if res.MatchedCount == 0 {
 		return ledger.ErrEntryNotFound
 	}
+	if s.mutationLog != nil {
+		s.writeMutationEvent(ctx, internalReplication.Event{
+			Type:    internalReplication.TypeSetTags,
+			Stream:  stream,
+			EntryID: id,
+			Tags:    tags,
+		})
+	}
 	return nil
 }
 
@@ -313,6 +414,9 @@ func (s *Store) SetTags(ctx context.Context, stream string, id string, tags []st
 func (s *Store) SetAnnotations(ctx context.Context, stream string, id string, annotations map[string]*string) error {
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
+	}
+	if s.appendOnly {
+		return ledger.ErrNotSupported
 	}
 	ctx = s.sessionCtx(ctx)
 	oid, err := bson.ObjectIDFromHex(id)
@@ -345,6 +449,14 @@ func (s *Store) SetAnnotations(ctx context.Context, stream string, id string, an
 	}
 	if res.MatchedCount == 0 {
 		return ledger.ErrEntryNotFound
+	}
+	if s.mutationLog != nil {
+		s.writeMutationEvent(ctx, internalReplication.Event{
+			Type:        internalReplication.TypeSetAnnotations,
+			Stream:      stream,
+			EntryID:     id,
+			Annotations: annotations,
+		})
 	}
 	return nil
 }
@@ -412,7 +524,70 @@ func (s *Store) Trim(ctx context.Context, stream string, beforeID string) (int64
 	if err != nil {
 		return 0, fmt.Errorf("ledger/mongodb: trim: %w", err)
 	}
+	if s.mutationLog != nil && res.DeletedCount > 0 {
+		s.writeMutationEvent(ctx, internalReplication.Event{
+			Type:     internalReplication.TypeTrim,
+			Stream:   stream,
+			BeforeID: beforeID,
+		})
+	}
 	return res.DeletedCount, nil
+}
+
+// FindBySourceID resolves a sink entry ID from its replication source ID.
+func (s *Store) FindBySourceID(ctx context.Context, stream, sourceID string) (string, bool, error) {
+	if s.closed.Load() {
+		return "", false, ledger.ErrStoreClosed
+	}
+	ctx = s.sessionCtx(ctx)
+	var doc entry
+	err := s.coll.FindOne(ctx, bson.D{{Key: "stream", Value: stream}, {Key: "source_id", Value: sourceID}}).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("ledger/mongodb: find by source id: %w", err)
+	}
+	return doc.ID.Hex(), true, nil
+}
+
+// GetCursor returns the persisted replication cursor for the given name.
+func (s *Store) GetCursor(ctx context.Context, name string) (string, bool, error) {
+	if s.closed.Load() {
+		return "", false, ledger.ErrStoreClosed
+	}
+	var doc struct {
+		Cursor string `bson:"cursor"`
+	}
+	err := s.cursors.FindOne(ctx, bson.D{{Key: "_id", Value: name}}).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("ledger/mongodb: get cursor: %w", err)
+	}
+	return doc.Cursor, true, nil
+}
+
+// SetCursor persists the replication cursor for the given name.
+// Uses MongoDB $max so the cursor only advances — if the stored cursor is already
+// at or past the given value, the update is a no-op. This prevents a lagging Bridge
+// instance from regressing the cursor position set by a faster instance.
+// $max uses lexicographic comparison for strings, which is correct for MongoDB
+// ObjectID hex cursors (time-ordered, fixed-length).
+func (s *Store) SetCursor(ctx context.Context, name, cursor string) error {
+	if s.closed.Load() {
+		return ledger.ErrStoreClosed
+	}
+	_, err := s.cursors.UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: name}},
+		bson.D{{Key: "$max", Value: bson.D{{Key: "cursor", Value: cursor}}}},
+		mongoopts.UpdateOne().SetUpsert(true),
+	)
+	if err != nil {
+		return fmt.Errorf("ledger/mongodb: set cursor: %w", err)
+	}
+	return nil
 }
 
 // Health checks database connectivity.
