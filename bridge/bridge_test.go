@@ -68,6 +68,22 @@ func pollBridge[SI comparable, DI comparable](t *testing.T, r *bridge.Bridge[SI,
 	}
 }
 
+// mustNew creates a Bridge and fails the test if New returns an error.
+func mustNew[SI comparable, DI comparable](
+	t *testing.T,
+	mutations ledger.Store[SI, json.RawMessage],
+	sink ledger.Store[DI, json.RawMessage],
+	codec bridge.IDCodec[SI],
+	opts ...bridge.Option,
+) *bridge.Bridge[SI, DI] {
+	t.Helper()
+	b, err := bridge.New(mutations, sink, codec, opts...)
+	if err != nil {
+		t.Fatalf("bridge.New: %v", err)
+	}
+	return b
+}
+
 func TestBridge_Append(t *testing.T) {
 	ctx := context.Background()
 
@@ -90,7 +106,7 @@ func TestBridge_Append(t *testing.T) {
 	}
 
 	// Create and run bridge
-	r := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+	r := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
 		bridge.WithInterval(time.Millisecond),
 		bridge.WithName("test"),
 	)
@@ -122,7 +138,7 @@ func TestBridge_SetTags(t *testing.T) {
 	sinkDB := newTestDB(t)
 	sink := newTestStore(t, sinkDB, "orders")
 
-	r := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+	r := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
 		bridge.WithInterval(time.Millisecond),
 		bridge.WithName("test"),
 	)
@@ -146,7 +162,7 @@ func TestBridge_SetTags(t *testing.T) {
 	}
 
 	// Poll to replicate set_tags
-	r2 := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+	r2 := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
 		bridge.WithInterval(time.Millisecond),
 		bridge.WithName("test"),
 	)
@@ -174,7 +190,7 @@ func TestBridge_SetAnnotations(t *testing.T) {
 	sinkDB := newTestDB(t)
 	sink := newTestStore(t, sinkDB, "orders")
 
-	r := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+	r := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
 		bridge.WithInterval(time.Millisecond),
 		bridge.WithName("test"),
 	)
@@ -199,7 +215,7 @@ func TestBridge_SetAnnotations(t *testing.T) {
 	}
 
 	// Poll to replicate set_annotations
-	r2 := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+	r2 := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
 		bridge.WithInterval(time.Millisecond),
 		bridge.WithName("test"),
 	)
@@ -227,7 +243,7 @@ func TestBridge_Trim(t *testing.T) {
 	sinkDB := newTestDB(t)
 	sink := newTestStore(t, sinkDB, "orders")
 
-	r := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+	r := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
 		bridge.WithInterval(time.Millisecond),
 		bridge.WithName("test"),
 	)
@@ -270,7 +286,7 @@ func TestBridge_Trim(t *testing.T) {
 	}
 
 	// Poll to replicate trim
-	r2 := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+	r2 := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
 		bridge.WithInterval(time.Millisecond),
 		bridge.WithName("test"),
 	)
@@ -307,7 +323,7 @@ func TestBridge_CursorPersistence(t *testing.T) {
 	}
 
 	// First poll
-	r1 := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+	r1 := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
 		bridge.WithInterval(time.Millisecond),
 		bridge.WithName("cursor-test"),
 	)
@@ -332,7 +348,7 @@ func TestBridge_CursorPersistence(t *testing.T) {
 	}
 
 	// Second poll — should only pick up the new entry (cursor was persisted)
-	r2 := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+	r2 := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
 		bridge.WithInterval(time.Millisecond),
 		bridge.WithName("cursor-test"),
 	)
@@ -374,7 +390,7 @@ func TestBridge_IdempotentReplay(t *testing.T) {
 	// Instead, poll once and verify idempotency via DedupKey or source_id unique index.
 
 	// Poll once
-	r1 := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+	r1 := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
 		bridge.WithInterval(time.Millisecond),
 		bridge.WithName("idempotent-test"),
 	)
@@ -395,7 +411,7 @@ func TestBridge_IdempotentReplay(t *testing.T) {
 	}
 
 	// Poll again — same mutation replayed, source_id unique index prevents duplicate
-	r2 := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+	r2 := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
 		bridge.WithInterval(time.Millisecond),
 		bridge.WithName("idempotent-test"),
 	)
@@ -484,7 +500,7 @@ func TestBridge_Poll(t *testing.T) {
 	sinkDB := newTestDB(t)
 	sink := newTestStore(t, sinkDB, "orders")
 
-	r := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+	r := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
 		bridge.WithName("poll-test"),
 	)
 
@@ -561,7 +577,7 @@ func TestBridge_WithSkipMutationTypes(t *testing.T) {
 		t.Fatalf("source append: %v", err)
 	}
 
-	r := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+	r := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
 		bridge.WithName("skip-test"),
 		bridge.WithSkipMutationTypes(bridge.MutationSetTags, bridge.MutationSetAnnotations),
 	)
