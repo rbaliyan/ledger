@@ -17,10 +17,12 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync/atomic"
 
 	"github.com/rbaliyan/ledger"
+	internalReplication "github.com/rbaliyan/ledger/internal/replication"
 )
 
 type sqlExecutor interface {
@@ -33,22 +35,26 @@ type sqlExecutor interface {
 var (
 	_ ledger.Store[int64, json.RawMessage] = (*Store)(nil)
 	_ ledger.HealthChecker                 = (*Store)(nil)
+	_ ledger.CursorStore                   = (*Store)(nil)
+	_ ledger.SourceIDLookup[int64]         = (*Store)(nil)
 )
 
 // Store is a PostgreSQL ledger store.
 type Store struct {
-	db     *sql.DB
-	table  string
-	logger *slog.Logger
-	closed atomic.Bool
+	db          *sql.DB
+	table       string
+	logger      *slog.Logger
+	closed      atomic.Bool
+	mutationLog ledger.Store[int64, json.RawMessage]
 }
 
 // Option configures the PostgreSQL store.
 type Option func(*options)
 
 type options struct {
-	table  string
-	logger *slog.Logger
+	table       string
+	logger      *slog.Logger
+	mutationLog ledger.Store[int64, json.RawMessage]
 }
 
 // WithTable sets the table name. Defaults to "ledger_entries".
@@ -59,6 +65,12 @@ func WithTable(name string) Option {
 // WithLogger sets the structured logger. Defaults to slog.Default().
 func WithLogger(l *slog.Logger) Option {
 	return func(o *options) { o.logger = l }
+}
+
+// WithMutationLog enables atomic mutation tracking. mutLog must be backed by the
+// same *sql.DB so mutations and main writes share a transaction.
+func WithMutationLog(mutLog ledger.Store[int64, json.RawMessage]) Option {
+	return func(o *options) { o.mutationLog = mutLog }
 }
 
 // New creates a new PostgreSQL ledger store. The table and indexes are created
@@ -75,9 +87,12 @@ func New(ctx context.Context, db *sql.DB, opts ...Option) (*Store, error) {
 		return nil, fmt.Errorf("ledger/postgres: %w", err)
 	}
 
-	s := &Store{db: db, table: o.table, logger: o.logger}
+	s := &Store{db: db, table: o.table, logger: o.logger, mutationLog: o.mutationLog}
 	if err := s.createTable(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/postgres: create table: %w", err)
+	}
+	if err := s.migrateSchema(ctx); err != nil {
+		return nil, err
 	}
 	go s.createAsyncIndexes(o.logger)
 	return s, nil
@@ -95,6 +110,7 @@ func (s *Store) createTable(ctx context.Context) error {
 			metadata       JSONB,
 			tags           JSONB       NOT NULL DEFAULT '[]'::jsonb,
 			annotations    JSONB,
+			source_id      TEXT        NOT NULL DEFAULT '',
 			created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
 			updated_at     TIMESTAMPTZ
 		)`, s.table)
@@ -109,6 +125,8 @@ func (s *Store) createTable(ctx context.Context) error {
 		// Single-column stream index supports efficient DISTINCT scans for ListStreamIDs;
 		// cheap to maintain due to low cardinality of stream values.
 		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_%s_stream ON %s(stream)`, s.table, s.table),
+		fmt.Sprintf(`CREATE UNIQUE INDEX IF NOT EXISTS idx_%s_source ON %s(source_id) WHERE source_id != ''`, s.table, s.table),
+		fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s_cursors (name TEXT NOT NULL PRIMARY KEY, cursor TEXT NOT NULL)`, s.table),
 	} {
 		if _, err := s.db.ExecContext(ctx, idx); err != nil {
 			return err
@@ -128,11 +146,50 @@ func (s *Store) createAsyncIndexes(logger *slog.Logger) {
 	}
 }
 
+func (s *Store) migrateSchema(ctx context.Context) error {
+	alter := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN IF NOT EXISTS source_id TEXT NOT NULL DEFAULT ''`, s.table)
+	if _, err := s.db.ExecContext(ctx, alter); err != nil {
+		return fmt.Errorf("ledger/postgres: migrate schema: %w", err)
+	}
+	cursor := fmt.Sprintf(`CREATE TABLE IF NOT EXISTS %s_cursors (name TEXT NOT NULL PRIMARY KEY, cursor TEXT NOT NULL)`, s.table)
+	if _, err := s.db.ExecContext(ctx, cursor); err != nil {
+		return fmt.Errorf("ledger/postgres: create cursors table: %w", err)
+	}
+	idx := fmt.Sprintf(`CREATE UNIQUE INDEX IF NOT EXISTS idx_%s_source ON %s(source_id) WHERE source_id != ''`, s.table, s.table)
+	if _, err := s.db.ExecContext(ctx, idx); err != nil {
+		return fmt.Errorf("ledger/postgres: create source index: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) executor(ctx context.Context) sqlExecutor {
 	if tx, ok := ledger.TxFromContext(ctx).(*sql.Tx); ok {
 		return tx
 	}
 	return s.db
+}
+
+// withMutTx runs fn inside a transaction shared with the mutation log.
+// If there's already an external tx in ctx, uses it. Otherwise starts own tx only when mutationLog is set.
+// When mutationLog is nil, fn is called with the existing executor directly.
+func (s *Store) withMutTx(ctx context.Context, fn func(ctx context.Context, exec sqlExecutor) error) error {
+	exec := s.executor(ctx)
+	if s.mutationLog == nil {
+		return fn(ctx, exec)
+	}
+	if _, isExt := exec.(*sql.Tx); isExt {
+		return fn(ctx, exec)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("ledger/postgres: begin tx: %w", err)
+	}
+	defer tx.Rollback() //nolint:errcheck
+	ctx = ledger.WithTx(ctx, tx)
+	if err := fn(ctx, tx); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // Append adds entries to the named stream. Returns IDs of newly appended entries.
@@ -143,6 +200,8 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 	if len(entries) == 0 {
 		return nil, nil
 	}
+
+	srcIDs := internalReplication.SourceIDsFromContext(ctx)
 
 	exec := s.executor(ctx)
 
@@ -158,8 +217,8 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 	}
 
 	query := fmt.Sprintf(
-		`INSERT INTO %s (stream, payload, order_key, dedup_key, schema_version, metadata, tags)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)
+		`INSERT INTO %s (stream, payload, order_key, dedup_key, schema_version, metadata, tags, source_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 ON CONFLICT (stream, dedup_key) WHERE dedup_key != '' DO NOTHING
 		 RETURNING id`,
 		s.table,
@@ -170,8 +229,14 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 	}
 	defer stmt.Close()
 
+	type appendedEntry struct {
+		id int64
+		e  ledger.RawEntry[json.RawMessage]
+	}
+	var appended []appendedEntry
+
 	var ids []int64
-	for _, e := range entries {
+	for i, e := range entries {
 		meta, err := encodeJSONB(e.Metadata)
 		if err != nil {
 			return nil, fmt.Errorf("ledger/postgres: encode metadata: %w", err)
@@ -182,8 +247,13 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		}
 		tagsJSON, _ := json.Marshal(tags)
 
+		var srcID string
+		if i < len(srcIDs) {
+			srcID = srcIDs[i]
+		}
+
 		var id int64
-		err = stmt.QueryRowContext(ctx, stream, []byte(e.Payload), e.OrderKey, e.DedupKey, e.SchemaVersion, meta, tagsJSON).Scan(&id)
+		err = stmt.QueryRowContext(ctx, stream, []byte(e.Payload), e.OrderKey, e.DedupKey, e.SchemaVersion, meta, tagsJSON, srcID).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			s.logger.DebugContext(ctx, "dedup skip", "stream", stream, "dedup_key", e.DedupKey)
 			continue
@@ -192,6 +262,40 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 			return nil, fmt.Errorf("ledger/postgres: insert: %w", err)
 		}
 		ids = append(ids, id)
+		appended = append(appended, appendedEntry{id: id, e: e})
+	}
+
+	if s.mutationLog != nil && len(appended) > 0 {
+		evtEntries := make([]internalReplication.EventEntry, len(appended))
+		for i, ae := range appended {
+			evtEntries[i] = internalReplication.EventEntry{
+				ID:            strconv.FormatInt(ae.id, 10),
+				Payload:       json.RawMessage(ae.e.Payload),
+				OrderKey:      ae.e.OrderKey,
+				DedupKey:      ae.e.DedupKey,
+				SchemaVersion: ae.e.SchemaVersion,
+				Metadata:      ae.e.Metadata,
+				Tags:          ae.e.Tags,
+			}
+		}
+		evt := internalReplication.Event{
+			Type:    internalReplication.TypeAppend,
+			Stream:  stream,
+			Entries: evtEntries,
+		}
+		evtData, err := json.Marshal(evt)
+		if err != nil {
+			return nil, fmt.Errorf("ledger/postgres: encode mutation event: %w", err)
+		}
+		var mutCtx context.Context
+		if ownTx != nil {
+			mutCtx = ledger.WithTx(ctx, ownTx)
+		} else {
+			mutCtx = ctx
+		}
+		if _, err := s.mutationLog.Append(mutCtx, internalReplication.MutationStream, ledger.RawEntry[json.RawMessage]{Payload: evtData, SchemaVersion: 1}); err != nil {
+			return nil, fmt.Errorf("ledger/postgres: append mutation: %w", err)
+		}
 	}
 
 	if ownTx != nil {
@@ -328,16 +432,29 @@ func (s *Store) SetTags(ctx context.Context, stream string, id int64, tags []str
 		tags = []string{}
 	}
 	tagsJSON, _ := json.Marshal(tags)
-	exec := s.executor(ctx)
-	res, err := exec.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET tags = $1::jsonb, updated_at = now() WHERE stream = $2 AND id = $3`, s.table), string(tagsJSON), stream, id)
-	if err != nil {
-		return fmt.Errorf("ledger/postgres: set tags: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ledger.ErrEntryNotFound
-	}
-	return nil
+	return s.withMutTx(ctx, func(ctx context.Context, exec sqlExecutor) error {
+		res, err := exec.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET tags = $1::jsonb, updated_at = now() WHERE stream = $2 AND id = $3`, s.table), string(tagsJSON), stream, id)
+		if err != nil {
+			return fmt.Errorf("ledger/postgres: set tags: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return ledger.ErrEntryNotFound
+		}
+		if s.mutationLog != nil {
+			evt := internalReplication.Event{
+				Type:    internalReplication.TypeSetTags,
+				Stream:  stream,
+				EntryID: strconv.FormatInt(id, 10),
+				Tags:    tags,
+			}
+			data, _ := json.Marshal(evt)
+			if _, err := s.mutationLog.Append(ctx, internalReplication.MutationStream, ledger.RawEntry[json.RawMessage]{Payload: data, SchemaVersion: 1}); err != nil {
+				return fmt.Errorf("ledger/postgres: append set_tags mutation: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 // SetAnnotations merges annotations into an entry. Keys with nil values are deleted.
@@ -345,35 +462,48 @@ func (s *Store) SetAnnotations(ctx context.Context, stream string, id int64, ann
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
 	}
-	exec := s.executor(ctx)
-
-	// Read current
-	var raw []byte
-	err := exec.QueryRowContext(ctx, fmt.Sprintf(`SELECT COALESCE(annotations, '{}'::jsonb) FROM %s WHERE stream = $1 AND id = $2`, s.table), stream, id).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return ledger.ErrEntryNotFound
-	}
-	if err != nil {
-		return fmt.Errorf("ledger/postgres: read annotations: %w", err)
-	}
-
-	current := make(map[string]string)
-	json.Unmarshal(raw, &current) //nolint:errcheck
-
-	for k, v := range annotations {
-		if v == nil {
-			delete(current, k)
-		} else {
-			current[k] = *v
+	return s.withMutTx(ctx, func(ctx context.Context, exec sqlExecutor) error {
+		// Read current
+		var raw []byte
+		err := exec.QueryRowContext(ctx, fmt.Sprintf(`SELECT COALESCE(annotations, '{}'::jsonb) FROM %s WHERE stream = $1 AND id = $2`, s.table), stream, id).Scan(&raw)
+		if errors.Is(err, sql.ErrNoRows) {
+			return ledger.ErrEntryNotFound
 		}
-	}
+		if err != nil {
+			return fmt.Errorf("ledger/postgres: read annotations: %w", err)
+		}
 
-	data, _ := json.Marshal(current)
-	_, err = exec.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET annotations = $1::jsonb, updated_at = now() WHERE stream = $2 AND id = $3`, s.table), string(data), stream, id)
-	if err != nil {
-		return fmt.Errorf("ledger/postgres: set annotations: %w", err)
-	}
-	return nil
+		current := make(map[string]string)
+		json.Unmarshal(raw, &current) //nolint:errcheck
+
+		for k, v := range annotations {
+			if v == nil {
+				delete(current, k)
+			} else {
+				current[k] = *v
+			}
+		}
+
+		data, _ := json.Marshal(current)
+		_, err = exec.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET annotations = $1::jsonb, updated_at = now() WHERE stream = $2 AND id = $3`, s.table), string(data), stream, id)
+		if err != nil {
+			return fmt.Errorf("ledger/postgres: set annotations: %w", err)
+		}
+
+		if s.mutationLog != nil {
+			evt := internalReplication.Event{
+				Type:        internalReplication.TypeSetAnnotations,
+				Stream:      stream,
+				EntryID:     strconv.FormatInt(id, 10),
+				Annotations: annotations,
+			}
+			evtData, _ := json.Marshal(evt)
+			if _, err := s.mutationLog.Append(ctx, internalReplication.MutationStream, ledger.RawEntry[json.RawMessage]{Payload: evtData, SchemaVersion: 1}); err != nil {
+				return fmt.Errorf("ledger/postgres: append set_annotations mutation: %w", err)
+			}
+		}
+		return nil
+	})
 }
 
 // ListStreamIDs returns distinct stream IDs with at least one entry in this store.
@@ -418,13 +548,72 @@ func (s *Store) Trim(ctx context.Context, stream string, beforeID int64) (int64,
 	if s.closed.Load() {
 		return 0, ledger.ErrStoreClosed
 	}
-	exec := s.executor(ctx)
-	res, err := exec.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE stream = $1 AND id <= $2`, s.table), stream, beforeID)
-	if err != nil {
-		return 0, fmt.Errorf("ledger/postgres: trim: %w", err)
+	var n int64
+	err := s.withMutTx(ctx, func(ctx context.Context, exec sqlExecutor) error {
+		res, err := exec.ExecContext(ctx, fmt.Sprintf(`DELETE FROM %s WHERE stream = $1 AND id <= $2`, s.table), stream, beforeID)
+		if err != nil {
+			return fmt.Errorf("ledger/postgres: trim: %w", err)
+		}
+		n, _ = res.RowsAffected()
+		if s.mutationLog != nil {
+			evt := internalReplication.Event{
+				Type:     internalReplication.TypeTrim,
+				Stream:   stream,
+				BeforeID: strconv.FormatInt(beforeID, 10),
+			}
+			data, _ := json.Marshal(evt)
+			if _, err := s.mutationLog.Append(ctx, internalReplication.MutationStream, ledger.RawEntry[json.RawMessage]{Payload: data, SchemaVersion: 1}); err != nil {
+				return fmt.Errorf("ledger/postgres: append trim mutation: %w", err)
+			}
+		}
+		return nil
+	})
+	return n, err
+}
+
+// FindBySourceID resolves a sink entry ID from its replication source ID.
+func (s *Store) FindBySourceID(ctx context.Context, stream, sourceID string) (int64, bool, error) {
+	if s.closed.Load() {
+		return 0, false, ledger.ErrStoreClosed
 	}
-	n, _ := res.RowsAffected()
-	return n, nil
+	exec := s.executor(ctx)
+	var id int64
+	err := exec.QueryRowContext(ctx, fmt.Sprintf(`SELECT id FROM %s WHERE stream = $1 AND source_id = $2 LIMIT 1`, s.table), stream, sourceID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, fmt.Errorf("ledger/postgres: find by source id: %w", err)
+	}
+	return id, true, nil
+}
+
+// GetCursor returns the persisted replication cursor for the given name.
+func (s *Store) GetCursor(ctx context.Context, name string) (string, bool, error) {
+	if s.closed.Load() {
+		return "", false, ledger.ErrStoreClosed
+	}
+	var cursor string
+	err := s.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT cursor FROM %s_cursors WHERE name = $1`, s.table), name).Scan(&cursor)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("ledger/postgres: get cursor: %w", err)
+	}
+	return cursor, true, nil
+}
+
+// SetCursor persists the replication cursor for the given name.
+func (s *Store) SetCursor(ctx context.Context, name, cursor string) error {
+	if s.closed.Load() {
+		return ledger.ErrStoreClosed
+	}
+	query := fmt.Sprintf(`INSERT INTO %s_cursors (name, cursor) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET cursor = EXCLUDED.cursor`, s.table)
+	if _, err := s.db.ExecContext(ctx, query, name, cursor); err != nil {
+		return fmt.Errorf("ledger/postgres: set cursor: %w", err)
+	}
+	return nil
 }
 
 // Health checks database connectivity.

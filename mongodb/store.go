@@ -15,12 +15,14 @@ package mongodb
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync/atomic"
 	"time"
 
 	"github.com/rbaliyan/ledger"
+	internalReplication "github.com/rbaliyan/ledger/internal/replication"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
 	"go.mongodb.org/mongo-driver/v2/mongo/options"
@@ -29,6 +31,8 @@ import (
 var (
 	_ ledger.Store[string, bson.Raw] = (*Store)(nil)
 	_ ledger.HealthChecker           = (*Store)(nil)
+	_ ledger.CursorStore             = (*Store)(nil)
+	_ ledger.SourceIDLookup[string]  = (*Store)(nil)
 )
 
 type entry struct {
@@ -41,16 +45,18 @@ type entry struct {
 	Metadata      map[string]string `bson:"metadata,omitempty"`
 	Tags          []string          `bson:"tags"`
 	Annotations   map[string]string `bson:"annotations,omitempty"`
+	SourceID      string            `bson:"source_id,omitempty"`
 	CreatedAt     time.Time         `bson:"created_at"`
 	UpdatedAt     *time.Time        `bson:"updated_at,omitempty"`
 }
 
 // Store is a MongoDB ledger store.
 type Store struct {
-	db     *mongo.Database
-	coll   *mongo.Collection
-	logger *slog.Logger
-	closed atomic.Bool
+	db      *mongo.Database
+	coll    *mongo.Collection
+	cursors *mongo.Collection
+	logger  *slog.Logger
+	closed  atomic.Bool
 }
 
 // Option configures the MongoDB store.
@@ -86,7 +92,8 @@ func New(ctx context.Context, db *mongo.Database, opts ...Option) (*Store, error
 	}
 
 	coll := db.Collection(o.collection)
-	s := &Store{db: db, coll: coll, logger: o.logger}
+	cursors := db.Collection(o.collection + "_cursors")
+	s := &Store{db: db, coll: coll, cursors: cursors, logger: o.logger}
 	if err := s.ensureIndexes(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/mongodb: ensure indexes: %w", err)
 	}
@@ -107,6 +114,10 @@ func (s *Store) ensureIndexes(ctx context.Context) error {
 		// Single-field stream index supports DISTINCT_SCAN plan for ListStreamIDs;
 		// cheap to maintain due to low cardinality of stream values.
 		{Keys: bson.D{{Key: "stream", Value: 1}}},
+		{
+			Keys:    bson.D{{Key: "source_id", Value: 1}},
+			Options: options.Index().SetSparse(true).SetUnique(true),
+		},
 	}
 	_, err := s.coll.Indexes().CreateMany(ctx, models)
 	return err
@@ -141,6 +152,8 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		return nil, nil
 	}
 
+	srcIDs := internalReplication.SourceIDsFromContext(ctx)
+
 	ctx = s.sessionCtx(ctx)
 	now := time.Now().UTC()
 	docs := make([]entry, len(entries))
@@ -148,6 +161,10 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		tags := e.Tags
 		if tags == nil {
 			tags = []string{}
+		}
+		var srcID string
+		if i < len(srcIDs) {
+			srcID = srcIDs[i]
 		}
 		docs[i] = entry{
 			ID:            bson.NewObjectID(),
@@ -158,6 +175,7 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 			SchemaVersion: e.SchemaVersion,
 			Metadata:      e.Metadata,
 			Tags:          tags,
+			SourceID:      srcID,
 			CreatedAt:     now,
 		}
 	}
@@ -413,6 +431,57 @@ func (s *Store) Trim(ctx context.Context, stream string, beforeID string) (int64
 		return 0, fmt.Errorf("ledger/mongodb: trim: %w", err)
 	}
 	return res.DeletedCount, nil
+}
+
+// FindBySourceID resolves a sink entry ID from its replication source ID.
+func (s *Store) FindBySourceID(ctx context.Context, stream, sourceID string) (string, bool, error) {
+	if s.closed.Load() {
+		return "", false, ledger.ErrStoreClosed
+	}
+	ctx = s.sessionCtx(ctx)
+	var doc entry
+	err := s.coll.FindOne(ctx, bson.D{{Key: "stream", Value: stream}, {Key: "source_id", Value: sourceID}}).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("ledger/mongodb: find by source id: %w", err)
+	}
+	return doc.ID.Hex(), true, nil
+}
+
+// GetCursor returns the persisted replication cursor for the given name.
+func (s *Store) GetCursor(ctx context.Context, name string) (string, bool, error) {
+	if s.closed.Load() {
+		return "", false, ledger.ErrStoreClosed
+	}
+	var doc struct {
+		Cursor string `bson:"cursor"`
+	}
+	err := s.cursors.FindOne(ctx, bson.D{{Key: "_id", Value: name}}).Decode(&doc)
+	if errors.Is(err, mongo.ErrNoDocuments) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("ledger/mongodb: get cursor: %w", err)
+	}
+	return doc.Cursor, true, nil
+}
+
+// SetCursor persists the replication cursor for the given name.
+func (s *Store) SetCursor(ctx context.Context, name, cursor string) error {
+	if s.closed.Load() {
+		return ledger.ErrStoreClosed
+	}
+	_, err := s.cursors.UpdateOne(ctx,
+		bson.D{{Key: "_id", Value: name}},
+		bson.D{{Key: "$set", Value: bson.D{{Key: "cursor", Value: cursor}}}},
+		options.UpdateOne().SetUpsert(true),
+	)
+	if err != nil {
+		return fmt.Errorf("ledger/mongodb: set cursor: %w", err)
+	}
+	return nil
 }
 
 // Health checks database connectivity.

@@ -23,4 +23,7 @@ var (
 
 	// ErrEntryNotFound is returned when SetTags or SetAnnotations targets a non-existent entry.
 	ErrEntryNotFound = errors.New("ledger: entry not found")
+
+	// ErrReadOnly is returned when a write operation is attempted on a read-only stream.
+	ErrReadOnly = errors.New("ledger: stream is read-only")
 )
