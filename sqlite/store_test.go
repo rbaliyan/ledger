@@ -176,7 +176,10 @@ func TestStreamTypedAppendAndRead(t *testing.T) {
 		Amount float64 `json:"amount"`
 	}
 
-	s := ledger.NewStream(store, "orders", ledger.JSONCodec[Order]{})
+	s, err := ledger.NewStream(store, "orders", ledger.JSONCodec[Order]{})
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
 
 	ids, err := s.Append(ctx, ledger.AppendInput[Order]{
 		Payload:  Order{ID: "o-1", Amount: 99.99},
@@ -228,12 +231,15 @@ func TestStreamSchemaUpcast(t *testing.T) {
 		Amount float64 `json:"amount"`
 	}
 
-	s := ledger.NewStream(store, "orders", ledger.JSONCodec[OrderV2]{},
+	s, err := ledger.NewStream(store, "orders", ledger.JSONCodec[OrderV2]{},
 		ledger.WithSchemaVersion[json.RawMessage](2),
 		ledger.WithUpcaster(ledger.NewFieldMapper(1, 2).
 			RenameField("customer_name", "name").
 			AddDefault("email", "unknown@example.com")),
 	)
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
 
 	entries, err := s.Read(ctx)
 	if err != nil {

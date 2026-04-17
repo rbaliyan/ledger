@@ -417,11 +417,14 @@ func TestReadOnlyStream(t *testing.T) {
 	db := newTestDB(t)
 	store := newTestStore(t, db, "orders")
 
-	stream := ledger.NewStream(store, "user-1", ledger.JSONCodec[testPayload]{})
+	stream, err := ledger.NewStream(store, "user-1", ledger.JSONCodec[testPayload]{})
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
 	ros := bridge.NewReadOnlyStream(stream)
 
 	// Write ops should return ErrReadOnly
-	_, err := ros.Append(ctx, ledger.AppendInput[testPayload]{Payload: testPayload{Value: "x"}})
+	_, err = ros.Append(ctx, ledger.AppendInput[testPayload]{Payload: testPayload{Value: "x"}})
 	if !errors.Is(err, ledger.ErrReadOnly) {
 		t.Errorf("Append: expected ErrReadOnly, got %v", err)
 	}
