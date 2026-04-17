@@ -107,7 +107,7 @@ type RawEntry[P any] struct {
 	SchemaVersion int               // Schema version of the payload.
 	Metadata      map[string]string // Arbitrary immutable key-value metadata.
 	Tags          []string          // Initial tags (mutable after append via SetTags).
-	SourceID      string            // Replication source entry ID. Empty for native writes.
+	SourceID      string            // Source entry ID set by bridge.Bridge during replication. Empty for native writes.
 }
 
 // StoredEntry is a raw entry read back from the store, including its assigned ID and timestamp.

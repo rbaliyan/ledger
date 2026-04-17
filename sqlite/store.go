@@ -519,7 +519,7 @@ func (s *Store) SetAnnotations(ctx context.Context, stream string, id int64, ann
 		query := fmt.Sprintf(`SELECT annotations FROM %s WHERE stream = ? AND id = ?`, s.table)
 		var raw sql.NullString
 		if err := exec.QueryRowContext(ctx, query, stream, id).Scan(&raw); err != nil {
-			if err == sql.ErrNoRows {
+			if errors.Is(err, sql.ErrNoRows) {
 				return ledger.ErrEntryNotFound
 			}
 			return fmt.Errorf("ledger/sqlite: read annotations: %w", err)
@@ -527,7 +527,9 @@ func (s *Store) SetAnnotations(ctx context.Context, stream string, id int64, ann
 
 		current := make(map[string]string)
 		if raw.Valid {
-			json.Unmarshal([]byte(raw.String), &current) //nolint:errcheck
+			if err := json.Unmarshal([]byte(raw.String), &current); err != nil {
+				return fmt.Errorf("ledger/sqlite: unmarshal annotations: %w", err)
+			}
 		}
 
 		// Merge: set or delete.

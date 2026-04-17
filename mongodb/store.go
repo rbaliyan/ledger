@@ -26,7 +26,7 @@ import (
 	internalReplication "github.com/rbaliyan/ledger/internal/replication"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	mongoopts "go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 var (
@@ -63,9 +63,9 @@ type Store struct {
 }
 
 // Option configures the MongoDB store.
-type Option func(*storeOptions)
+type Option func(*options)
 
-type storeOptions struct {
+type options struct {
 	collection  string
 	logger      *slog.Logger
 	mutationLog ledger.Store[string, json.RawMessage]
@@ -74,18 +74,18 @@ type storeOptions struct {
 
 // WithCollection sets the collection name. Defaults to "ledger_entries".
 func WithCollection(name string) Option {
-	return func(o *storeOptions) { o.collection = name }
+	return func(o *options) { o.collection = name }
 }
 
 // WithLogger sets the structured logger. Defaults to slog.Default().
 func WithLogger(l *slog.Logger) Option {
-	return func(o *storeOptions) { o.logger = l }
+	return func(o *options) { o.logger = l }
 }
 
 // WithAppendOnly disables SetTags and SetAnnotations, returning [ledger.ErrNotSupported].
 // Use this when the replication sink (e.g. ClickHouse) does not support entry mutations.
 func WithAppendOnly() Option {
-	return func(o *storeOptions) { o.appendOnly = true }
+	return func(o *options) { o.appendOnly = true }
 }
 
 // WithMutationLog enables mutation logging. Every successful write
@@ -99,7 +99,7 @@ func WithAppendOnly() Option {
 // a crash between the main write and the mutation log write will lose that
 // event (the main data is still durable).
 func WithMutationLog(mutLog ledger.Store[string, json.RawMessage]) Option {
-	return func(o *storeOptions) { o.mutationLog = mutLog }
+	return func(o *options) { o.mutationLog = mutLog }
 }
 
 // New creates a new MongoDB ledger store. Indexes are created automatically.
@@ -108,7 +108,7 @@ func New(ctx context.Context, db *mongo.Database, opts ...Option) (*Store, error
 	if db == nil {
 		return nil, fmt.Errorf("ledger/mongodb: db must not be nil")
 	}
-	o := storeOptions{collection: "ledger_entries", logger: slog.Default()}
+	o := options{collection: "ledger_entries", logger: slog.Default()}
 	for _, fn := range opts {
 		fn(&o)
 	}
@@ -132,7 +132,7 @@ func (s *Store) ensureIndexes(ctx context.Context) error {
 		{Keys: bson.D{{Key: "stream", Value: 1}, {Key: "order_key", Value: 1}, {Key: "_id", Value: 1}}},
 		{
 			Keys: bson.D{{Key: "stream", Value: 1}, {Key: "dedup_key", Value: 1}},
-			Options: options.Index().
+			Options: mongoopts.Index().
 				SetUnique(true).
 				SetPartialFilterExpression(bson.D{{Key: "dedup_key", Value: bson.D{{Key: "$gt", Value: ""}}}}),
 		},
@@ -141,7 +141,7 @@ func (s *Store) ensureIndexes(ctx context.Context) error {
 		{Keys: bson.D{{Key: "stream", Value: 1}}},
 		{
 			Keys:    bson.D{{Key: "source_id", Value: 1}},
-			Options: options.Index().SetSparse(true).SetUnique(true),
+			Options: mongoopts.Index().SetSparse(true).SetUnique(true),
 		},
 	}
 	_, err := s.coll.Indexes().CreateMany(ctx, models)
@@ -220,21 +220,22 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		}
 	}
 
-	insertOpts := options.InsertMany().SetOrdered(false)
+	insertOpts := mongoopts.InsertMany().SetOrdered(false)
 	_, err := s.coll.InsertMany(ctx, docs, insertOpts)
 
 	failed := make(map[int]struct{})
+	var appendErr error
 	if err != nil {
-		bwe, ok := err.(mongo.BulkWriteException)
-		if !ok {
+		var bwe mongo.BulkWriteException
+		if !errors.As(err, &bwe) {
 			return nil, fmt.Errorf("ledger/mongodb: insert many: %w", err)
 		}
 		for _, we := range bwe.WriteErrors {
+			failed[we.Index] = struct{}{}
 			if we.HasErrorCode(11000) {
-				failed[we.Index] = struct{}{}
 				s.logger.DebugContext(ctx, "dedup skip", "stream", stream, "index", we.Index)
 			} else {
-				return nil, fmt.Errorf("ledger/mongodb: insert at index %d: %w", we.Index, err)
+				appendErr = errors.Join(appendErr, fmt.Errorf("ledger/mongodb: insert at index %d code=%d: %s", we.Index, we.Code, we.Message))
 			}
 		}
 	}
@@ -276,7 +277,7 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		}
 	}
 
-	return ids, nil
+	return ids, appendErr
 }
 
 // Read returns entries from the named stream.
@@ -322,7 +323,7 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 		sortDir = -1
 	}
 
-	findOpts := options.Find().
+	findOpts := mongoopts.Find().
 		SetSort(bson.D{{Key: "_id", Value: sortDir}}).
 		SetLimit(int64(o.Limit()))
 
@@ -581,7 +582,7 @@ func (s *Store) SetCursor(ctx context.Context, name, cursor string) error {
 	_, err := s.cursors.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: name}},
 		bson.D{{Key: "$max", Value: bson.D{{Key: "cursor", Value: cursor}}}},
-		options.UpdateOne().SetUpsert(true),
+		mongoopts.UpdateOne().SetUpsert(true),
 	)
 	if err != nil {
 		return fmt.Errorf("ledger/mongodb: set cursor: %w", err)

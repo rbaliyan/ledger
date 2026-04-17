@@ -27,6 +27,7 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -135,12 +136,12 @@ ORDER BY name`, s.table) // #nosec G201 -- table name validated by ValidateName
 }
 
 // generateID returns a time-ordered hex string suitable for use as a row ID.
-// Format: 16-char nanosecond timestamp + 8-char random suffix (24 chars total).
+// Format: 16-char nanosecond timestamp + 16-char random suffix (32 chars total, 64 bits of entropy).
 func generateID() string {
-	var b [4]byte
+	var b [8]byte
 	_, _ = rand.Read(b[:])
 	ts := uint64(time.Now().UnixNano())
-	return fmt.Sprintf("%016x%02x%02x%02x%02x", ts, b[0], b[1], b[2], b[3])
+	return fmt.Sprintf("%016x%016x", ts, binary.BigEndian.Uint64(b[:]))
 }
 
 // Append inserts entries into the named stream as a single batch transaction.
@@ -316,19 +317,27 @@ func (s *Store) SetAnnotations(_ context.Context, _, _ string, _ map[string]*str
 // Trim deletes entries with IDs lexicographically less than or equal to beforeID.
 // ClickHouse lightweight deletes are asynchronous; rows are physically removed
 // during the next background merge. Requires ClickHouse 22.8+.
-// Returns 0 for the deleted count since ClickHouse does not report it.
 func (s *Store) Trim(ctx context.Context, stream, beforeID string) (int64, error) {
 	if s.closed.Load() {
 		return 0, ledger.ErrStoreClosed
 	}
-	_, err := s.db.ExecContext(ctx,
+	var count int64
+	if err := s.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT count() FROM %s WHERE stream = ? AND id <= ?`, s.table), // #nosec G201
+		stream, beforeID,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("ledger/clickhouse: trim count: %w", err)
+	}
+	if count == 0 {
+		return 0, nil
+	}
+	if _, err := s.db.ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM %s WHERE stream = ? AND id <= ?`, s.table), // #nosec G201
 		stream, beforeID,
-	)
-	if err != nil {
+	); err != nil {
 		return 0, fmt.Errorf("ledger/clickhouse: trim: %w", err)
 	}
-	return 0, nil
+	return count, nil
 }
 
 // ListStreamIDs returns distinct stream IDs in this store.

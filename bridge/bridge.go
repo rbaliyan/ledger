@@ -250,7 +250,7 @@ func (b *Bridge[SI, DI]) poll(ctx context.Context) error {
 	}
 
 	if len(entries) > 0 && b.sinkCursor != nil {
-		if err := b.advanceCursor(ctx, cursor, lastID); err != nil {
+		if err := b.advanceCursor(ctx, lastID); err != nil {
 			return fmt.Errorf("advance cursor: %w", err)
 		}
 	}
@@ -260,7 +260,7 @@ func (b *Bridge[SI, DI]) poll(ctx context.Context) error {
 // advanceCursor writes the cursor only if lastID is strictly greater than the
 // current stored cursor. Re-reading the cursor before writing prevents a lagging
 // Bridge instance from regressing the position advanced by a faster instance.
-func (b *Bridge[SI, DI]) advanceCursor(ctx context.Context, knownCursor, lastID SI) error {
+func (b *Bridge[SI, DI]) advanceCursor(ctx context.Context, lastID SI) error {
 	// Re-read current cursor to guard against concurrent advancement.
 	currentStr, ok, err := b.sinkCursor.GetCursor(ctx, b.name)
 	if err != nil {
@@ -277,7 +277,6 @@ func (b *Bridge[SI, DI]) advanceCursor(ctx context.Context, knownCursor, lastID 
 	if !b.codec.Less(current, lastID) {
 		return nil
 	}
-	_ = knownCursor // retained for potential future use (optimistic CAS)
 	return b.sinkCursor.SetCursor(ctx, b.name, b.codec.Encode(lastID))
 }
 
