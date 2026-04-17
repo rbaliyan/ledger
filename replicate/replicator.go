@@ -19,15 +19,16 @@ import (
 //
 // The sink store should be wrapped in a ReadOnlyStream to prevent accidental writes.
 type Replicator[SI comparable, DI comparable] struct {
-	mutations  ledger.Store[SI, json.RawMessage]
-	sink       ledger.Store[DI, json.RawMessage]
-	sinkCursor ledger.CursorStore
-	sinkLookup ledger.SourceIDLookup[DI]
-	codec      IDCodec[SI]
-	name       string
-	interval   time.Duration
-	batchSize  int
-	logger     *slog.Logger
+	mutations         ledger.Store[SI, json.RawMessage]
+	sink              ledger.Store[DI, json.RawMessage]
+	sinkCursor        ledger.CursorStore
+	sinkLookup        ledger.SourceIDLookup[DI]
+	codec             IDCodec[SI]
+	name              string
+	interval          time.Duration
+	batchSize         int
+	logger            *slog.Logger
+	skipMutationTypes map[MutationType]struct{}
 
 	stop    chan struct{}
 	stopped chan struct{}
@@ -37,10 +38,11 @@ type Replicator[SI comparable, DI comparable] struct {
 type ReplicatorOption func(*replicatorOptions)
 
 type replicatorOptions struct {
-	name      string
-	interval  time.Duration
-	batchSize int
-	logger    *slog.Logger
+	name             string
+	interval         time.Duration
+	batchSize        int
+	logger           *slog.Logger
+	skipMutationTypes map[MutationType]struct{}
 }
 
 func defaultReplicatorOptions() replicatorOptions {
@@ -81,6 +83,21 @@ func WithReplicatorLogger(l *slog.Logger) ReplicatorOption {
 	return func(o *replicatorOptions) { o.logger = l }
 }
 
+// WithSkipMutationTypes instructs the replicator to silently drop mutation events of the
+// given types instead of applying them to the sink. Use this when the sink backend does
+// not support the operation — e.g. pass MutationSetTags and MutationSetAnnotations when
+// replicating to ClickHouse.
+func WithSkipMutationTypes(types ...MutationType) ReplicatorOption {
+	return func(o *replicatorOptions) {
+		if o.skipMutationTypes == nil {
+			o.skipMutationTypes = make(map[MutationType]struct{}, len(types))
+		}
+		for _, t := range types {
+			o.skipMutationTypes[t] = struct{}{}
+		}
+	}
+}
+
 // New creates a Replicator. mutations is the source mutation log store (same DB as source).
 // sink is the destination store. codec serialises the mutation log's ID type for cursor storage.
 //
@@ -98,15 +115,16 @@ func New[SI comparable, DI comparable](
 		opt(&o)
 	}
 	r := &Replicator[SI, DI]{
-		mutations: mutations,
-		sink:      sink,
-		codec:     codec,
-		name:      o.name,
-		interval:  o.interval,
-		batchSize: o.batchSize,
-		logger:    o.logger,
-		stop:      make(chan struct{}),
-		stopped:   make(chan struct{}),
+		mutations:         mutations,
+		sink:              sink,
+		codec:             codec,
+		name:              o.name,
+		interval:          o.interval,
+		batchSize:         o.batchSize,
+		logger:            o.logger,
+		skipMutationTypes: o.skipMutationTypes,
+		stop:              make(chan struct{}),
+		stopped:           make(chan struct{}),
 	}
 	r.sinkCursor, _ = sink.(ledger.CursorStore)
 	r.sinkLookup, _ = sink.(ledger.SourceIDLookup[DI])
@@ -189,6 +207,10 @@ func (r *Replicator[SI, DI]) poll(ctx context.Context) error {
 }
 
 func (r *Replicator[SI, DI]) apply(ctx context.Context, evt MutationEvent) error {
+	if _, skip := r.skipMutationTypes[evt.Type]; skip {
+		r.logger.Debug("skipping mutation type", "type", evt.Type, "stream", evt.Stream)
+		return nil
+	}
 	switch evt.Type {
 	case MutationAppend:
 		return r.applyAppend(ctx, evt)
