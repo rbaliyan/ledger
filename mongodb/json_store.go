@@ -10,7 +10,7 @@ import (
 	"github.com/rbaliyan/ledger"
 	"go.mongodb.org/mongo-driver/v2/bson"
 	"go.mongodb.org/mongo-driver/v2/mongo"
-	"go.mongodb.org/mongo-driver/v2/mongo/options"
+	mongoopts "go.mongodb.org/mongo-driver/v2/mongo/options"
 )
 
 var (
@@ -104,7 +104,7 @@ func (s *JSONStore) Append(ctx context.Context, stream string, entries ...ledger
 			CreatedAt:     now,
 		}
 	}
-	if _, err := s.coll.InsertMany(ctx, docs, options.InsertMany().SetOrdered(true)); err != nil {
+	if _, err := s.coll.InsertMany(ctx, docs, mongoopts.InsertMany().SetOrdered(true)); err != nil {
 		return nil, fmt.Errorf("ledger/mongodb: insert many: %w", err)
 	}
 	ids := make([]string, len(docs))
@@ -143,7 +143,7 @@ func (s *JSONStore) Read(ctx context.Context, stream string, opts ...ledger.Read
 	if o.Order() == ledger.Descending {
 		sortDir = -1
 	}
-	findOpts := options.Find().
+	findOpts := mongoopts.Find().
 		SetSort(bson.D{{Key: "_id", Value: sortDir}}).
 		SetLimit(int64(o.Limit()))
 

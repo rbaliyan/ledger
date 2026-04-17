@@ -249,13 +249,35 @@ func TestJSONCodecErrors(t *testing.T) {
 	}
 }
 
-func TestNewStreamPanicsOnNilStore(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("NewStream with nil store should panic")
-		}
-	}()
-	NewStream[int64, json.RawMessage, any](nil, "test", JSONCodec[any]{})
+type stubStore struct{}
+
+func (stubStore) Append(_ context.Context, _ string, _ ...RawEntry[json.RawMessage]) ([]int64, error) {
+	return nil, nil
+}
+func (stubStore) Read(_ context.Context, _ string, _ ...ReadOption) ([]StoredEntry[int64, json.RawMessage], error) {
+	return nil, nil
+}
+func (stubStore) Count(_ context.Context, _ string) (int64, error)                         { return 0, nil }
+func (stubStore) SetTags(_ context.Context, _ string, _ int64, _ []string) error           { return nil }
+func (stubStore) SetAnnotations(_ context.Context, _ string, _ int64, _ map[string]*string) error {
+	return nil
+}
+func (stubStore) Trim(_ context.Context, _ string, _ int64) (int64, error)            { return 0, nil }
+func (stubStore) ListStreamIDs(_ context.Context, _ ...ListOption) ([]string, error)  { return nil, nil }
+func (stubStore) Close(_ context.Context) error                                        { return nil }
+
+func TestNewStream_NilStore(t *testing.T) {
+	_, err := NewStream[int64, json.RawMessage, any](nil, "test", JSONCodec[any]{})
+	if err == nil {
+		t.Error("NewStream with nil store should return error")
+	}
+}
+
+func TestNewStream_NilCodec(t *testing.T) {
+	_, err := NewStream[int64, json.RawMessage, any](stubStore{}, "test", nil)
+	if err == nil {
+		t.Error("NewStream with nil codec should return error")
+	}
 }
 
 func TestFieldMapper_NilPayload(t *testing.T) {

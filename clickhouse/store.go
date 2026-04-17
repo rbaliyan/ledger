@@ -5,12 +5,12 @@
 // ClickHouse lightweight deletes (requires ClickHouse 22.8+) and is
 // asynchronous — deleted rows are physically removed during the next merge.
 //
-// # Replication sink
+// # Bridge sink
 //
 // The store implements [ledger.CursorStore] and [ledger.SourceIDLookup] so it
-// can be used as a sink with [replicate.Replicator]. Always pair it with
-// [replicate.WithSkipMutationTypes](MutationSetTags, MutationSetAnnotations)
-// on the replicator, and create the source store with [WithAppendOnly] (or the
+// can be used as a sink with [bridge.Bridge]. Always pair it with
+// [bridge.WithSkipMutationTypes](MutationSetTags, MutationSetAnnotations)
+// on the Bridge, and create the source store with [WithAppendOnly] (or the
 // equivalent option on the source backend) to prevent the source from producing
 // mutation events that the sink cannot apply.
 //
@@ -27,16 +27,17 @@ import (
 	"context"
 	"crypto/rand"
 	"database/sql"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2" // register "clickhouse" driver
 	"github.com/rbaliyan/ledger"
-	internalReplication "github.com/rbaliyan/ledger/internal/replication"
 )
 
 var (
@@ -51,20 +52,27 @@ var (
 type Store struct {
 	db     *sql.DB
 	table  string
+	logger *slog.Logger
 	closed atomic.Bool
 }
 
 // Option configures the ClickHouse store.
-type Option func(*storeOptions)
+type Option func(*options)
 
-type storeOptions struct {
-	table string
+type options struct {
+	table  string
+	logger *slog.Logger
 }
 
 // WithTable sets the table name. Defaults to "ledger_entries".
 // The name must be a valid identifier (alphanumeric and underscore only).
 func WithTable(name string) Option {
-	return func(o *storeOptions) { o.table = name }
+	return func(o *options) { o.table = name }
+}
+
+// WithLogger sets the structured logger. Defaults to slog.Default().
+func WithLogger(l *slog.Logger) Option {
+	return func(o *options) { o.logger = l }
 }
 
 // New creates a ClickHouse ledger store. The table and cursors table are
@@ -74,14 +82,14 @@ func New(ctx context.Context, db *sql.DB, opts ...Option) (*Store, error) {
 	if db == nil {
 		return nil, fmt.Errorf("ledger/clickhouse: db must not be nil")
 	}
-	o := storeOptions{table: "ledger_entries"}
+	o := options{table: "ledger_entries", logger: slog.Default()}
 	for _, fn := range opts {
 		fn(&o)
 	}
 	if err := ledger.ValidateName(o.table); err != nil {
 		return nil, fmt.Errorf("ledger/clickhouse: %w", err)
 	}
-	s := &Store{db: db, table: o.table}
+	s := &Store{db: db, table: o.table, logger: o.logger}
 	if err := s.createTable(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/clickhouse: create table: %w", err)
 	}
@@ -128,17 +136,17 @@ ORDER BY name`, s.table) // #nosec G201 -- table name validated by ValidateName
 }
 
 // generateID returns a time-ordered hex string suitable for use as a row ID.
-// Format: 16-char nanosecond timestamp + 8-char random suffix (24 chars total).
+// Format: 16-char nanosecond timestamp + 16-char random suffix (32 chars total, 64 bits of entropy).
 func generateID() string {
-	var b [4]byte
+	var b [8]byte
 	_, _ = rand.Read(b[:])
 	ts := uint64(time.Now().UnixNano())
-	return fmt.Sprintf("%016x%02x%02x%02x%02x", ts, b[0], b[1], b[2], b[3])
+	return fmt.Sprintf("%016x%016x", ts, binary.BigEndian.Uint64(b[:]))
 }
 
-// Append inserts entries into the named stream. Tags are stored as a JSON array
-// string. The returned IDs are the ClickHouse row IDs (source_id when
-// replicating, otherwise a generated time-ordered ID).
+// Append inserts entries into the named stream as a single batch transaction.
+// Tags are stored as a JSON array string. The returned IDs are the ClickHouse
+// row IDs (source_id when replicating, otherwise a generated time-ordered ID).
 func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.RawEntry[json.RawMessage]) ([]string, error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
@@ -147,20 +155,25 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		return nil, nil
 	}
 
-	srcIDs := internalReplication.SourceIDsFromContext(ctx)
-
-	ids := make([]string, len(entries))
 	query := fmt.Sprintf( // #nosec G201 -- table name validated by ValidateName
 		`INSERT INTO %s (id, stream, payload, order_key, dedup_key, schema_version, metadata, tags, source_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		s.table,
 	)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ledger/clickhouse: begin tx: %w", err)
+	}
+	stmt, err := tx.PrepareContext(ctx, query)
+	if err != nil {
+		tx.Rollback() //nolint:errcheck
+		return nil, fmt.Errorf("ledger/clickhouse: prepare: %w", err)
+	}
+	defer stmt.Close()
+
 	now := time.Now().UTC()
+	ids := make([]string, len(entries))
 	for i, e := range entries {
-		var srcID string
-		if i < len(srcIDs) {
-			srcID = srcIDs[i]
-		}
-		id := srcID
+		id := e.SourceID
 		if id == "" {
 			id = generateID()
 		}
@@ -179,10 +192,14 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 			}
 		}
 
-		if _, err := s.db.ExecContext(ctx, query, id, stream, string(e.Payload),
-			e.OrderKey, e.DedupKey, e.SchemaVersion, metadata, tags, srcID, now); err != nil {
+		if _, err := stmt.ExecContext(ctx, id, stream, string(e.Payload),
+			e.OrderKey, e.DedupKey, e.SchemaVersion, metadata, tags, e.SourceID, now); err != nil {
+			tx.Rollback() //nolint:errcheck
 			return nil, fmt.Errorf("ledger/clickhouse: append entry %d: %w", i, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("ledger/clickhouse: commit: %w", err)
 	}
 	return ids, nil
 }
@@ -300,19 +317,27 @@ func (s *Store) SetAnnotations(_ context.Context, _, _ string, _ map[string]*str
 // Trim deletes entries with IDs lexicographically less than or equal to beforeID.
 // ClickHouse lightweight deletes are asynchronous; rows are physically removed
 // during the next background merge. Requires ClickHouse 22.8+.
-// Returns 0 for the deleted count since ClickHouse does not report it.
 func (s *Store) Trim(ctx context.Context, stream, beforeID string) (int64, error) {
 	if s.closed.Load() {
 		return 0, ledger.ErrStoreClosed
 	}
-	_, err := s.db.ExecContext(ctx,
+	var count int64
+	if err := s.db.QueryRowContext(ctx,
+		fmt.Sprintf(`SELECT count() FROM %s WHERE stream = ? AND id <= ?`, s.table), // #nosec G201
+		stream, beforeID,
+	).Scan(&count); err != nil {
+		return 0, fmt.Errorf("ledger/clickhouse: trim count: %w", err)
+	}
+	if count == 0 {
+		return 0, nil
+	}
+	if _, err := s.db.ExecContext(ctx,
 		fmt.Sprintf(`DELETE FROM %s WHERE stream = ? AND id <= ?`, s.table), // #nosec G201
 		stream, beforeID,
-	)
-	if err != nil {
+	); err != nil {
 		return 0, fmt.Errorf("ledger/clickhouse: trim: %w", err)
 	}
-	return 0, nil
+	return count, nil
 }
 
 // ListStreamIDs returns distinct stream IDs in this store.
@@ -383,13 +408,26 @@ func (s *Store) GetCursor(ctx context.Context, name string) (string, bool, error
 }
 
 // SetCursor persists the replication cursor for the given name.
-// ReplacingMergeTree deduplicates by name on the next merge; FINAL on reads
-// ensures the latest value is always returned.
+// The cursor is only advanced — if the stored cursor is already at or past the
+// given value, the write is skipped. This prevents a lagging Bridge instance from
+// regressing the cursor set by a faster instance.
+//
+// ClickHouse ReplacingMergeTree has no conditional upsert, so advancement is
+// checked with a preceding read. The read-then-write window is a best-effort
+// guard; the Bridge's application-level check in advanceCursor provides an
+// additional layer of protection.
 func (s *Store) SetCursor(ctx context.Context, name, cursor string) error {
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
 	}
-	_, err := s.db.ExecContext(ctx,
+	current, ok, err := s.GetCursor(ctx, name)
+	if err != nil {
+		return fmt.Errorf("ledger/clickhouse: check cursor: %w", err)
+	}
+	if ok && current >= cursor {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx,
 		fmt.Sprintf(`INSERT INTO %s_cursors (name, cursor, updated_at) VALUES (?, ?, ?)`, s.table), // #nosec G201
 		name, cursor, time.Now().UTC(),
 	)
