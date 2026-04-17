@@ -9,6 +9,12 @@ import (
 	"sync/atomic"
 	"time"
 
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
+
 	"github.com/rbaliyan/ledger"
 	internalReplication "github.com/rbaliyan/ledger/internal/replication"
 )
@@ -45,6 +51,11 @@ type Bridge[SI comparable, DI comparable] struct {
 	logger            *slog.Logger
 	skipMutationTypes map[MutationType]struct{}
 
+	// OTel
+	tracer        trace.Tracer
+	metrics       *bridgeMetrics
+	enableTraces  bool
+
 	startOnce  sync.Once
 	stopOnce   sync.Once
 	started    atomic.Bool
@@ -65,14 +76,23 @@ type options struct {
 	batchSize         int
 	logger            *slog.Logger
 	skipMutationTypes map[MutationType]struct{}
+	// OTel
+	enableTraces  bool
+	enableMetrics bool
+	tracerName    string
+	meterName     string
+	tracer        trace.Tracer
+	meter         metric.Meter
 }
 
 func defaultOptions() options {
 	return options{
-		name:      "default",
-		interval:  5 * time.Second,
-		batchSize: 500,
-		logger:    slog.Default(),
+		name:        "default",
+		interval:    5 * time.Second,
+		batchSize:   500,
+		logger:      slog.Default(),
+		tracerName:  "github.com/rbaliyan/ledger/bridge",
+		meterName:   "github.com/rbaliyan/ledger/bridge",
 	}
 }
 
@@ -127,12 +147,15 @@ func WithSkipMutationTypes(types ...MutationType) Option {
 // Bridge resumes from where it left off after a restart.
 // If sink implements [ledger.SourceIDLookup], SetTags, SetAnnotations, and Trim mutations
 // are applied; otherwise they are skipped with a warning.
+//
+// Returns an error only if OTel metrics initialisation fails (when [WithMetricsEnabled](true)
+// is passed). All other configuration errors are surfaced at Start/Poll time.
 func New[SI comparable, DI comparable](
 	mutations ledger.Store[SI, json.RawMessage],
 	sink ledger.Store[DI, json.RawMessage],
 	codec IDCodec[SI],
 	opts ...Option,
-) *Bridge[SI, DI] {
+) (*Bridge[SI, DI], error) {
 	o := defaultOptions()
 	for _, opt := range opts {
 		opt(&o)
@@ -146,6 +169,7 @@ func New[SI comparable, DI comparable](
 		batchSize:         o.batchSize,
 		logger:            o.logger,
 		skipMutationTypes: o.skipMutationTypes,
+		enableTraces:      o.enableTraces,
 		stop:              make(chan struct{}),
 		stopped:           make(chan struct{}),
 	}
@@ -154,7 +178,30 @@ func New[SI comparable, DI comparable](
 	if b.sinkCursor == nil {
 		o.logger.Warn("bridge sink does not implement CursorStore; progress will not be persisted across restarts", "name", o.name)
 	}
-	return b
+
+	if o.enableTraces {
+		if o.tracer != nil {
+			b.tracer = o.tracer
+		} else {
+			b.tracer = otel.Tracer(o.tracerName)
+		}
+	}
+
+	if o.enableMetrics {
+		var m metric.Meter
+		if o.meter != nil {
+			m = o.meter
+		} else {
+			m = otel.Meter(o.meterName)
+		}
+		metrics, err := initBridgeMetrics(m)
+		if err != nil {
+			return nil, fmt.Errorf("bridge: init metrics: %w", err)
+		}
+		b.metrics = metrics
+	}
+
+	return b, nil
 }
 
 // Start begins bridging in a background goroutine. Safe to call once; subsequent
@@ -218,16 +265,28 @@ func (b *Bridge[SI, DI]) run(ctx context.Context) {
 
 func (b *Bridge[SI, DI]) poll(ctx context.Context) error {
 	b.pollCount.Add(1)
+	start := time.Now()
+
+	nameAttr := attribute.String("bridge.name", b.name)
+
+	if b.enableTraces {
+		var span trace.Span
+		ctx, span = b.tracer.Start(ctx, "ledger.bridge.Poll",
+			trace.WithAttributes(nameAttr))
+		defer span.End()
+	}
 
 	cursor := b.codec.Zero()
 	if b.sinkCursor != nil {
 		s, ok, err := b.sinkCursor.GetCursor(ctx, b.name)
 		if err != nil {
+			b.recordPoll(ctx, start, nameAttr, true)
 			return fmt.Errorf("get cursor: %w", err)
 		}
 		if ok {
 			cursor, err = b.codec.Decode(s)
 			if err != nil {
+				b.recordPoll(ctx, start, nameAttr, true)
 				return fmt.Errorf("decode cursor: %w", err)
 			}
 		}
@@ -239,27 +298,38 @@ func (b *Bridge[SI, DI]) poll(ctx context.Context) error {
 	}
 	entries, err := b.mutations.Read(ctx, internalReplication.MutationStream, readOpts...)
 	if err != nil {
+		b.recordPoll(ctx, start, nameAttr, true)
 		return fmt.Errorf("read mutations: %w", err)
 	}
 
 	if len(entries) == 0 {
 		b.logger.Debug("bridge poll: no new mutations", "name", b.name)
+		b.recordPoll(ctx, start, nameAttr, false)
 		return nil
+	}
+
+	// Record replication lag: age of the oldest unprocessed mutation.
+	if b.metrics != nil {
+		lag := time.Since(entries[0].CreatedAt).Seconds()
+		b.metrics.lagSeconds.Record(ctx, lag, metric.WithAttributes(nameAttr))
 	}
 
 	var lastID SI
 	for _, e := range entries {
 		var evt MutationEvent
 		if err := json.Unmarshal(e.Payload, &evt); err != nil {
+			b.recordPoll(ctx, start, nameAttr, true)
 			return fmt.Errorf("decode mutation event: %w", err)
 		}
 		if err := b.apply(ctx, evt); err != nil {
+			b.recordPoll(ctx, start, nameAttr, true)
 			return fmt.Errorf("apply %s mutation on stream %q: %w", evt.Type, evt.Stream, err)
 		}
 		lastID = e.ID
 	}
 
 	b.logger.Debug("bridge poll: applied mutations", "name", b.name, "count", len(entries), "cursor", b.codec.Encode(lastID))
+	b.recordPoll(ctx, start, nameAttr, false)
 
 	if b.sinkCursor != nil {
 		if err := b.advanceCursor(ctx, lastID); err != nil {
@@ -267,6 +337,28 @@ func (b *Bridge[SI, DI]) poll(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+func (b *Bridge[SI, DI]) recordPoll(ctx context.Context, start time.Time, nameAttr attribute.KeyValue, failed bool) {
+	if b.metrics == nil {
+		return
+	}
+	status := "success"
+	if failed {
+		status = "error"
+	}
+	attrs := metric.WithAttributes(nameAttr, attribute.String("status", status))
+	b.metrics.pollTotal.Add(ctx, 1, attrs)
+	b.metrics.pollDuration.Record(ctx, time.Since(start).Seconds(), attrs)
+
+	if b.enableTraces {
+		span := trace.SpanFromContext(ctx)
+		if failed {
+			span.SetStatus(codes.Error, "poll failed")
+		} else {
+			span.SetStatus(codes.Ok, "")
+		}
+	}
 }
 
 // advanceCursor writes the cursor only if lastID is strictly greater than the
@@ -295,25 +387,42 @@ func (b *Bridge[SI, DI]) advanceCursor(ctx context.Context, lastID SI) error {
 }
 
 func (b *Bridge[SI, DI]) apply(ctx context.Context, evt MutationEvent) error {
+	typeAttr := attribute.String("mutation.type", string(evt.Type))
+	nameAttr := attribute.String("bridge.name", b.name)
+
 	if _, skip := b.skipMutationTypes[evt.Type]; skip {
 		b.skipCount.Add(1)
 		b.logger.Debug("skipping mutation type", "type", evt.Type, "stream", evt.Stream)
+		if b.metrics != nil {
+			b.metrics.mutationsSkipped.Add(ctx, 1, metric.WithAttributes(nameAttr, typeAttr))
+		}
 		return nil
 	}
 	b.applyCount.Add(1)
+
+	var err error
 	switch evt.Type {
 	case MutationAppend:
-		return b.applyAppend(ctx, evt)
+		err = b.applyAppend(ctx, evt)
 	case MutationSetTags:
-		return b.applySetTags(ctx, evt)
+		err = b.applySetTags(ctx, evt)
 	case MutationSetAnnotations:
-		return b.applySetAnnotations(ctx, evt)
+		err = b.applySetAnnotations(ctx, evt)
 	case MutationTrim:
-		return b.applyTrim(ctx, evt)
+		err = b.applyTrim(ctx, evt)
 	default:
 		b.logger.Warn("unknown mutation type, skipping", "type", evt.Type)
-		return ledger.ErrNotSupported
+		err = ledger.ErrNotSupported
 	}
+
+	if b.metrics != nil {
+		if err != nil {
+			b.metrics.mutationErrors.Add(ctx, 1, metric.WithAttributes(nameAttr, typeAttr))
+		} else {
+			b.metrics.mutationsApplied.Add(ctx, 1, metric.WithAttributes(nameAttr, typeAttr))
+		}
+	}
+	return err
 }
 
 func (b *Bridge[SI, DI]) applyAppend(ctx context.Context, evt MutationEvent) error {
