@@ -223,11 +223,11 @@ func (r *Replicator[SI, DI]) poll(ctx context.Context) error {
 		}
 	}
 
-	entries, err := r.mutations.Read(ctx,
-		internalReplication.MutationStream,
-		ledger.After(cursor),
-		ledger.Limit(r.batchSize),
-	)
+	readOpts := []ledger.ReadOption{ledger.Limit(r.batchSize)}
+	if cursor != r.codec.Zero() {
+		readOpts = append(readOpts, ledger.After(cursor))
+	}
+	entries, err := r.mutations.Read(ctx, internalReplication.MutationStream, readOpts...)
 	if err != nil {
 		return fmt.Errorf("read mutations: %w", err)
 	}
