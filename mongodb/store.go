@@ -59,6 +59,7 @@ type Store struct {
 	mutationLog ledger.Store[string, json.RawMessage]
 	logger      *slog.Logger
 	closed      atomic.Bool
+	appendOnly  bool
 }
 
 // Option configures the MongoDB store.
@@ -68,6 +69,7 @@ type storeOptions struct {
 	collection  string
 	logger      *slog.Logger
 	mutationLog ledger.Store[string, json.RawMessage]
+	appendOnly  bool
 }
 
 // WithCollection sets the collection name. Defaults to "ledger_entries".
@@ -78,6 +80,12 @@ func WithCollection(name string) Option {
 // WithLogger sets the structured logger. Defaults to slog.Default().
 func WithLogger(l *slog.Logger) Option {
 	return func(o *storeOptions) { o.logger = l }
+}
+
+// WithAppendOnly disables SetTags and SetAnnotations, returning [ledger.ErrNotSupported].
+// Use this when the replication sink (e.g. ClickHouse) does not support entry mutations.
+func WithAppendOnly() Option {
+	return func(o *storeOptions) { o.appendOnly = true }
 }
 
 // WithMutationLog enables replication mutation logging. Every successful write
@@ -110,7 +118,7 @@ func New(ctx context.Context, db *mongo.Database, opts ...Option) (*Store, error
 
 	coll := db.Collection(o.collection)
 	cursors := db.Collection(o.collection + "_cursors")
-	s := &Store{db: db, coll: coll, cursors: cursors, mutationLog: o.mutationLog, logger: o.logger}
+	s := &Store{db: db, coll: coll, cursors: cursors, mutationLog: o.mutationLog, logger: o.logger, appendOnly: o.appendOnly}
 	if err := s.ensureIndexes(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/mongodb: ensure indexes: %w", err)
 	}
@@ -374,6 +382,9 @@ func (s *Store) SetTags(ctx context.Context, stream string, id string, tags []st
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
 	}
+	if s.appendOnly {
+		return ledger.ErrNotSupported
+	}
 	if tags == nil {
 		tags = []string{}
 	}
@@ -408,6 +419,9 @@ func (s *Store) SetTags(ctx context.Context, stream string, id string, tags []st
 func (s *Store) SetAnnotations(ctx context.Context, stream string, id string, annotations map[string]*string) error {
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
+	}
+	if s.appendOnly {
+		return ledger.ErrNotSupported
 	}
 	ctx = s.sessionCtx(ctx)
 	oid, err := bson.ObjectIDFromHex(id)

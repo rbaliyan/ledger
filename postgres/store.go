@@ -46,6 +46,7 @@ type Store struct {
 	logger      *slog.Logger
 	closed      atomic.Bool
 	mutationLog ledger.Store[int64, json.RawMessage]
+	appendOnly  bool
 }
 
 // Option configures the PostgreSQL store.
@@ -55,6 +56,7 @@ type options struct {
 	table       string
 	logger      *slog.Logger
 	mutationLog ledger.Store[int64, json.RawMessage]
+	appendOnly  bool
 }
 
 // WithTable sets the table name. Defaults to "ledger_entries".
@@ -73,6 +75,12 @@ func WithMutationLog(mutLog ledger.Store[int64, json.RawMessage]) Option {
 	return func(o *options) { o.mutationLog = mutLog }
 }
 
+// WithAppendOnly disables SetTags and SetAnnotations, returning [ledger.ErrNotSupported].
+// Use this when the replication sink (e.g. ClickHouse) does not support entry mutations.
+func WithAppendOnly() Option {
+	return func(o *options) { o.appendOnly = true }
+}
+
 // New creates a new PostgreSQL ledger store. The table and indexes are created
 // automatically. Tag GIN indexes are created asynchronously in the background.
 func New(ctx context.Context, db *sql.DB, opts ...Option) (*Store, error) {
@@ -87,7 +95,7 @@ func New(ctx context.Context, db *sql.DB, opts ...Option) (*Store, error) {
 		return nil, fmt.Errorf("ledger/postgres: %w", err)
 	}
 
-	s := &Store{db: db, table: o.table, logger: o.logger, mutationLog: o.mutationLog}
+	s := &Store{db: db, table: o.table, logger: o.logger, mutationLog: o.mutationLog, appendOnly: o.appendOnly}
 	if err := s.createTable(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/postgres: create table: %w", err)
 	}
@@ -428,6 +436,9 @@ func (s *Store) SetTags(ctx context.Context, stream string, id int64, tags []str
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
 	}
+	if s.appendOnly {
+		return ledger.ErrNotSupported
+	}
 	if tags == nil {
 		tags = []string{}
 	}
@@ -461,6 +472,9 @@ func (s *Store) SetTags(ctx context.Context, stream string, id int64, tags []str
 func (s *Store) SetAnnotations(ctx context.Context, stream string, id int64, annotations map[string]*string) error {
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
+	}
+	if s.appendOnly {
+		return ledger.ErrNotSupported
 	}
 	return s.withMutTx(ctx, func(ctx context.Context, exec sqlExecutor) error {
 		// Read current

@@ -48,6 +48,7 @@ type Store struct {
 	logger      *slog.Logger
 	closed      atomic.Bool
 	mutationLog ledger.Store[int64, json.RawMessage]
+	appendOnly  bool
 }
 
 // Option configures the SQLite store.
@@ -57,6 +58,7 @@ type options struct {
 	table       string
 	logger      *slog.Logger
 	mutationLog ledger.Store[int64, json.RawMessage]
+	appendOnly  bool
 }
 
 // WithTable sets the table name. Defaults to "ledger_entries".
@@ -76,6 +78,13 @@ func WithMutationLog(mutLog ledger.Store[int64, json.RawMessage]) Option {
 	return func(o *options) { o.mutationLog = mutLog }
 }
 
+// WithAppendOnly disables SetTags and SetAnnotations, returning [ledger.ErrNotSupported].
+// Use this when the replication sink (e.g. ClickHouse) does not support entry mutations,
+// so the source cannot produce mutation events that the sink cannot apply.
+func WithAppendOnly() Option {
+	return func(o *options) { o.appendOnly = true }
+}
+
 // New creates a new SQLite ledger store. The table and indexes are created
 // automatically. Tag indexes are created asynchronously in the background.
 // The caller is responsible for opening and closing the *sql.DB.
@@ -91,7 +100,7 @@ func New(ctx context.Context, db *sql.DB, opts ...Option) (*Store, error) {
 		return nil, fmt.Errorf("ledger/sqlite: %w", err)
 	}
 
-	s := &Store{db: db, table: o.table, logger: o.logger, mutationLog: o.mutationLog}
+	s := &Store{db: db, table: o.table, logger: o.logger, mutationLog: o.mutationLog, appendOnly: o.appendOnly}
 	if err := s.createTable(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/sqlite: create table: %w", err)
 	}
@@ -468,6 +477,9 @@ func (s *Store) SetTags(ctx context.Context, stream string, id int64, tags []str
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
 	}
+	if s.appendOnly {
+		return ledger.ErrNotSupported
+	}
 	if tags == nil {
 		tags = []string{}
 	}
@@ -505,6 +517,9 @@ func (s *Store) SetTags(ctx context.Context, stream string, id int64, tags []str
 func (s *Store) SetAnnotations(ctx context.Context, stream string, id int64, annotations map[string]*string) error {
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
+	}
+	if s.appendOnly {
+		return ledger.ErrNotSupported
 	}
 	return s.withMutTx(ctx, func(ctx context.Context, exec sqlExecutor) error {
 		// Read current annotations.

@@ -26,4 +26,8 @@ var (
 
 	// ErrReadOnly is returned when a write operation is attempted on a read-only stream.
 	ErrReadOnly = errors.New("ledger: stream is read-only")
+
+	// ErrNotSupported is returned when an operation is not supported by the backend.
+	// ClickHouse and other append-only backends return this for SetTags and SetAnnotations.
+	ErrNotSupported = errors.New("ledger: operation not supported by this backend")
 )
