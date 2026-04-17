@@ -15,6 +15,7 @@ package mongodb
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -52,19 +53,21 @@ type entry struct {
 
 // Store is a MongoDB ledger store.
 type Store struct {
-	db      *mongo.Database
-	coll    *mongo.Collection
-	cursors *mongo.Collection
-	logger  *slog.Logger
-	closed  atomic.Bool
+	db          *mongo.Database
+	coll        *mongo.Collection
+	cursors     *mongo.Collection
+	mutationLog ledger.Store[string, json.RawMessage]
+	logger      *slog.Logger
+	closed      atomic.Bool
 }
 
 // Option configures the MongoDB store.
 type Option func(*storeOptions)
 
 type storeOptions struct {
-	collection string
-	logger     *slog.Logger
+	collection  string
+	logger      *slog.Logger
+	mutationLog ledger.Store[string, json.RawMessage]
 }
 
 // WithCollection sets the collection name. Defaults to "ledger_entries".
@@ -75,6 +78,20 @@ func WithCollection(name string) Option {
 // WithLogger sets the structured logger. Defaults to slog.Default().
 func WithLogger(l *slog.Logger) Option {
 	return func(o *storeOptions) { o.logger = l }
+}
+
+// WithMutationLog enables replication mutation logging. Every successful write
+// (Append, SetTags, SetAnnotations, Trim) is recorded as a JSON event in the
+// mutation log so a [replicate.Replicator] can apply it to a sink store.
+//
+// Use [NewJSONStore] in the same MongoDB database to keep everything in one
+// cluster. Mutation log writes share the session from [ledger.WithTx], so on
+// replica-set clusters you can make them atomic by wrapping calls in a
+// multi-document transaction. Without a transaction the writes are best-effort:
+// a crash between the main write and the mutation log write will lose that
+// replication event (the main data is still durable).
+func WithMutationLog(mutLog ledger.Store[string, json.RawMessage]) Option {
+	return func(o *storeOptions) { o.mutationLog = mutLog }
 }
 
 // New creates a new MongoDB ledger store. Indexes are created automatically.
@@ -93,7 +110,7 @@ func New(ctx context.Context, db *mongo.Database, opts ...Option) (*Store, error
 
 	coll := db.Collection(o.collection)
 	cursors := db.Collection(o.collection + "_cursors")
-	s := &Store{db: db, coll: coll, cursors: cursors, logger: o.logger}
+	s := &Store{db: db, coll: coll, cursors: cursors, mutationLog: o.mutationLog, logger: o.logger}
 	if err := s.ensureIndexes(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/mongodb: ensure indexes: %w", err)
 	}
@@ -133,6 +150,27 @@ func (s *Store) createAsyncIndexes(logger *slog.Logger) {
 	}
 	if _, err := s.coll.Indexes().CreateOne(context.Background(), model); err != nil && !s.closed.Load() {
 		logger.Warn("failed to create tags index", "error", err)
+	}
+}
+
+// bsonToJSON converts a BSON document to relaxed Extended JSON so it can be
+// stored in the mutation log and consumed by JSON-native sinks (e.g. ClickHouse).
+// Relaxed mode produces natural JSON numbers instead of $numberInt/$numberLong wrappers.
+func bsonToJSON(raw bson.Raw) (json.RawMessage, error) {
+	b, err := bson.MarshalExtJSON(raw, false, false)
+	if err != nil {
+		return nil, err
+	}
+	return json.RawMessage(b), nil
+}
+
+// writeMutationEvent appends a mutation event to the mutation log.
+// Failures are logged as warnings; the main operation has already committed.
+func (s *Store) writeMutationEvent(ctx context.Context, evt internalReplication.Event) {
+	data, _ := json.Marshal(evt)
+	if _, err := s.mutationLog.Append(ctx, internalReplication.MutationStream,
+		ledger.RawEntry[json.RawMessage]{Payload: data, SchemaVersion: 1}); err != nil {
+		s.logger.WarnContext(ctx, "mutation log write failed", "error", err, "type", evt.Type, "stream", evt.Stream)
 	}
 }
 
@@ -205,6 +243,37 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 			ids = append(ids, doc.ID.Hex())
 		}
 	}
+
+	if s.mutationLog != nil && len(ids) > 0 {
+		evtEntries := make([]internalReplication.EventEntry, 0, len(ids))
+		for i, doc := range docs {
+			if _, skip := failed[i]; skip {
+				continue
+			}
+			payload, err := bsonToJSON(doc.Payload)
+			if err != nil {
+				s.logger.WarnContext(ctx, "mutation log: bson→json transcode failed", "error", err, "stream", stream)
+				continue
+			}
+			evtEntries = append(evtEntries, internalReplication.EventEntry{
+				ID:            doc.ID.Hex(),
+				Payload:       payload,
+				OrderKey:      doc.OrderKey,
+				DedupKey:      doc.DedupKey,
+				SchemaVersion: doc.SchemaVersion,
+				Metadata:      doc.Metadata,
+				Tags:          doc.Tags,
+			})
+		}
+		if len(evtEntries) > 0 {
+			s.writeMutationEvent(ctx, internalReplication.Event{
+				Type:    internalReplication.TypeAppend,
+				Stream:  stream,
+				Entries: evtEntries,
+			})
+		}
+	}
+
 	return ids, nil
 }
 
@@ -324,6 +393,14 @@ func (s *Store) SetTags(ctx context.Context, stream string, id string, tags []st
 	if res.MatchedCount == 0 {
 		return ledger.ErrEntryNotFound
 	}
+	if s.mutationLog != nil {
+		s.writeMutationEvent(ctx, internalReplication.Event{
+			Type:    internalReplication.TypeSetTags,
+			Stream:  stream,
+			EntryID: id,
+			Tags:    tags,
+		})
+	}
 	return nil
 }
 
@@ -363,6 +440,14 @@ func (s *Store) SetAnnotations(ctx context.Context, stream string, id string, an
 	}
 	if res.MatchedCount == 0 {
 		return ledger.ErrEntryNotFound
+	}
+	if s.mutationLog != nil {
+		s.writeMutationEvent(ctx, internalReplication.Event{
+			Type:        internalReplication.TypeSetAnnotations,
+			Stream:      stream,
+			EntryID:     id,
+			Annotations: annotations,
+		})
 	}
 	return nil
 }
@@ -429,6 +514,13 @@ func (s *Store) Trim(ctx context.Context, stream string, beforeID string) (int64
 	})
 	if err != nil {
 		return 0, fmt.Errorf("ledger/mongodb: trim: %w", err)
+	}
+	if s.mutationLog != nil && res.DeletedCount > 0 {
+		s.writeMutationEvent(ctx, internalReplication.Event{
+			Type:     internalReplication.TypeTrim,
+			Stream:   stream,
+			BeforeID: beforeID,
+		})
 	}
 	return res.DeletedCount, nil
 }
