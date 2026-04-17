@@ -49,15 +49,21 @@ func ExampleNewStream() {
 
 	// The store represents the "orders" type (one table/collection).
 	// The stream is one instance within that type, identified by a stream ID.
-	s := ledger.NewStream(store, "user-123", ledger.JSONCodec[Order]{})
+	s, err := ledger.NewStream(store, "user-123", ledger.JSONCodec[Order]{})
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
 
-	ids, err := s.Append(context.Background(), ledger.AppendInput[Order]{
+	var ids []int64
+	ids, err = s.Append(context.Background(), ledger.AppendInput[Order]{
 		Payload:  Order{ID: "o-1", Amount: 99.99},
 		OrderKey: "customer-123",
 		DedupKey: "evt-abc",
 	})
 	if err != nil {
-		panic(err)
+		fmt.Println("error:", err)
+		return
 	}
 	fmt.Println("appended:", len(ids), "entries")
 	// Output: appended: 1 entries
@@ -73,12 +79,16 @@ func ExampleNewStream_schemaVersioning() {
 	}
 
 	// Create a v2 stream with upcaster from v1
-	s := ledger.NewStream(store, "user-123", ledger.JSONCodec[OrderV2]{},
+	s, err := ledger.NewStream(store, "user-123", ledger.JSONCodec[OrderV2]{},
 		ledger.WithSchemaVersion[json.RawMessage](2),
 		ledger.WithUpcaster(ledger.NewFieldMapper(1, 2).
 			RenameField("customer_name", "name").
 			AddDefault("email", "unknown@example.com")),
 	)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
 
 	fmt.Println("stream:", s.ID(), "schema version:", s.SchemaVersion())
 	// Output: stream: user-123 schema version: 2

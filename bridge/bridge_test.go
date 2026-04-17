@@ -1,4 +1,4 @@
-package replicate_test
+package bridge_test
 
 import (
 	"context"
@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/rbaliyan/ledger"
-	"github.com/rbaliyan/ledger/replicate"
+	"github.com/rbaliyan/ledger/bridge"
 	"github.com/rbaliyan/ledger/sqlite"
 	_ "modernc.org/sqlite"
 )
@@ -60,18 +60,15 @@ func newSourceWithMutLog(t *testing.T, db *sql.DB) (*sqlite.Store, *sqlite.Store
 	return source, mutStore
 }
 
-// pollReplicator runs one poll cycle using Start+Stop with a 1ms interval.
-func pollReplicator[SI comparable, DI comparable](t *testing.T, r *replicate.Replicator[SI, DI]) {
+// pollBridge runs one poll cycle via the exported Poll method.
+func pollBridge[SI comparable, DI comparable](t *testing.T, r *bridge.Bridge[SI, DI]) {
 	t.Helper()
-	// We can't call unexported poll directly. Instead: Start with tiny interval, wait, Stop.
-	// But Replicator.Start only fires after the ticker. We need to call Poll explicitly.
-	// Since Poll is not exported, wrap: use a 1ms interval, Start, sleep briefly, Stop.
-	r.Start(context.Background())
-	time.Sleep(50 * time.Millisecond)
-	r.Stop()
+	if err := r.Poll(context.Background()); err != nil {
+		t.Fatalf("pollBridge: %v", err)
+	}
 }
 
-func TestReplicator_Append(t *testing.T) {
+func TestBridge_Append(t *testing.T) {
 	ctx := context.Background()
 
 	// Source uses same DB for source + mutations (atomic)
@@ -92,12 +89,12 @@ func TestReplicator_Append(t *testing.T) {
 		t.Fatalf("source append: %v", err)
 	}
 
-	// Create and run replicator
-	r := replicate.New[int64, int64](mutStore, sink, replicate.Int64Codec{},
-		replicate.WithInterval(time.Millisecond),
-		replicate.WithName("test"),
+	// Create and run bridge
+	r := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+		bridge.WithInterval(time.Millisecond),
+		bridge.WithName("test"),
 	)
-	pollReplicator(t, r)
+	pollBridge(t, r)
 
 	// Verify sink has the entry
 	entries, err := sink.Read(ctx, "user-1")
@@ -116,7 +113,7 @@ func TestReplicator_Append(t *testing.T) {
 	}
 }
 
-func TestReplicator_SetTags(t *testing.T) {
+func TestBridge_SetTags(t *testing.T) {
 	ctx := context.Background()
 
 	srcDB := newTestDB(t)
@@ -125,9 +122,9 @@ func TestReplicator_SetTags(t *testing.T) {
 	sinkDB := newTestDB(t)
 	sink := newTestStore(t, sinkDB, "orders")
 
-	r := replicate.New[int64, int64](mutStore, sink, replicate.Int64Codec{},
-		replicate.WithInterval(time.Millisecond),
-		replicate.WithName("test"),
+	r := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+		bridge.WithInterval(time.Millisecond),
+		bridge.WithName("test"),
 	)
 
 	// Append to source
@@ -141,7 +138,7 @@ func TestReplicator_SetTags(t *testing.T) {
 	}
 
 	// Poll to replicate append
-	pollReplicator(t, r)
+	pollBridge(t, r)
 
 	// Set tags on source
 	if err := source.SetTags(ctx, "user-1", ids[0], []string{"processed"}); err != nil {
@@ -149,11 +146,11 @@ func TestReplicator_SetTags(t *testing.T) {
 	}
 
 	// Poll to replicate set_tags
-	r2 := replicate.New[int64, int64](mutStore, sink, replicate.Int64Codec{},
-		replicate.WithInterval(time.Millisecond),
-		replicate.WithName("test"),
+	r2 := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+		bridge.WithInterval(time.Millisecond),
+		bridge.WithName("test"),
 	)
-	pollReplicator(t, r2)
+	pollBridge(t, r2)
 
 	// Verify sink has the tags
 	entries, err := sink.Read(ctx, "user-1")
@@ -168,7 +165,7 @@ func TestReplicator_SetTags(t *testing.T) {
 	}
 }
 
-func TestReplicator_SetAnnotations(t *testing.T) {
+func TestBridge_SetAnnotations(t *testing.T) {
 	ctx := context.Background()
 
 	srcDB := newTestDB(t)
@@ -177,9 +174,9 @@ func TestReplicator_SetAnnotations(t *testing.T) {
 	sinkDB := newTestDB(t)
 	sink := newTestStore(t, sinkDB, "orders")
 
-	r := replicate.New[int64, int64](mutStore, sink, replicate.Int64Codec{},
-		replicate.WithInterval(time.Millisecond),
-		replicate.WithName("test"),
+	r := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+		bridge.WithInterval(time.Millisecond),
+		bridge.WithName("test"),
 	)
 
 	// Append to source
@@ -193,7 +190,7 @@ func TestReplicator_SetAnnotations(t *testing.T) {
 	}
 
 	// Poll to replicate append
-	pollReplicator(t, r)
+	pollBridge(t, r)
 
 	// Set annotations on source
 	v := "2024-01-01"
@@ -202,11 +199,11 @@ func TestReplicator_SetAnnotations(t *testing.T) {
 	}
 
 	// Poll to replicate set_annotations
-	r2 := replicate.New[int64, int64](mutStore, sink, replicate.Int64Codec{},
-		replicate.WithInterval(time.Millisecond),
-		replicate.WithName("test"),
+	r2 := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+		bridge.WithInterval(time.Millisecond),
+		bridge.WithName("test"),
 	)
-	pollReplicator(t, r2)
+	pollBridge(t, r2)
 
 	// Verify sink has the annotations
 	entries, err := sink.Read(ctx, "user-1")
@@ -221,7 +218,7 @@ func TestReplicator_SetAnnotations(t *testing.T) {
 	}
 }
 
-func TestReplicator_Trim(t *testing.T) {
+func TestBridge_Trim(t *testing.T) {
 	ctx := context.Background()
 
 	srcDB := newTestDB(t)
@@ -230,9 +227,9 @@ func TestReplicator_Trim(t *testing.T) {
 	sinkDB := newTestDB(t)
 	sink := newTestStore(t, sinkDB, "orders")
 
-	r := replicate.New[int64, int64](mutStore, sink, replicate.Int64Codec{},
-		replicate.WithInterval(time.Millisecond),
-		replicate.WithName("test"),
+	r := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+		bridge.WithInterval(time.Millisecond),
+		bridge.WithName("test"),
 	)
 
 	// Append 3 entries to source
@@ -256,7 +253,7 @@ func TestReplicator_Trim(t *testing.T) {
 	}
 
 	// Poll to replicate appends
-	pollReplicator(t, r)
+	pollBridge(t, r)
 
 	// Verify sink has 3 entries
 	sinkEntries, err := sink.Read(ctx, "user-1")
@@ -273,11 +270,11 @@ func TestReplicator_Trim(t *testing.T) {
 	}
 
 	// Poll to replicate trim
-	r2 := replicate.New[int64, int64](mutStore, sink, replicate.Int64Codec{},
-		replicate.WithInterval(time.Millisecond),
-		replicate.WithName("test"),
+	r2 := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+		bridge.WithInterval(time.Millisecond),
+		bridge.WithName("test"),
 	)
-	pollReplicator(t, r2)
+	pollBridge(t, r2)
 
 	// Verify sink has 1 entry remaining
 	sinkEntries, err = sink.Read(ctx, "user-1")
@@ -289,7 +286,7 @@ func TestReplicator_Trim(t *testing.T) {
 	}
 }
 
-func TestReplicator_CursorPersistence(t *testing.T) {
+func TestBridge_CursorPersistence(t *testing.T) {
 	ctx := context.Background()
 
 	srcDB := newTestDB(t)
@@ -310,11 +307,11 @@ func TestReplicator_CursorPersistence(t *testing.T) {
 	}
 
 	// First poll
-	r1 := replicate.New[int64, int64](mutStore, sink, replicate.Int64Codec{},
-		replicate.WithInterval(time.Millisecond),
-		replicate.WithName("cursor-test"),
+	r1 := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+		bridge.WithInterval(time.Millisecond),
+		bridge.WithName("cursor-test"),
 	)
-	pollReplicator(t, r1)
+	pollBridge(t, r1)
 
 	// Verify 2 entries in sink
 	entries, err := sink.Read(ctx, "user-1")
@@ -335,11 +332,11 @@ func TestReplicator_CursorPersistence(t *testing.T) {
 	}
 
 	// Second poll — should only pick up the new entry (cursor was persisted)
-	r2 := replicate.New[int64, int64](mutStore, sink, replicate.Int64Codec{},
-		replicate.WithInterval(time.Millisecond),
-		replicate.WithName("cursor-test"),
+	r2 := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+		bridge.WithInterval(time.Millisecond),
+		bridge.WithName("cursor-test"),
 	)
-	pollReplicator(t, r2)
+	pollBridge(t, r2)
 
 	// Verify 3 entries total, no duplicates
 	entries, err = sink.Read(ctx, "user-1")
@@ -351,7 +348,7 @@ func TestReplicator_CursorPersistence(t *testing.T) {
 	}
 }
 
-func TestReplicator_IdempotentReplay(t *testing.T) {
+func TestBridge_IdempotentReplay(t *testing.T) {
 	ctx := context.Background()
 
 	srcDB := newTestDB(t)
@@ -371,17 +368,17 @@ func TestReplicator_IdempotentReplay(t *testing.T) {
 	}
 
 	// Poll twice without updating cursor (simulate replay)
-	// Both replicators use name "no-cursor-persist" but sink doesn't advance cursor
-	// because we use a fresh replicator each time with zero cursor (no persistence)
+	// Both bridges use name "no-cursor-persist" but sink doesn't advance cursor
+	// because we use a fresh bridge each time with zero cursor (no persistence)
 	// by NOT using a CursorStore-capable sink — but our sink IS a CursorStore.
 	// Instead, poll once and verify idempotency via DedupKey or source_id unique index.
 
 	// Poll once
-	r1 := replicate.New[int64, int64](mutStore, sink, replicate.Int64Codec{},
-		replicate.WithInterval(time.Millisecond),
-		replicate.WithName("idempotent-test"),
+	r1 := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+		bridge.WithInterval(time.Millisecond),
+		bridge.WithName("idempotent-test"),
 	)
-	pollReplicator(t, r1)
+	pollBridge(t, r1)
 
 	// Verify 1 entry
 	entries, err := sink.Read(ctx, "user-1")
@@ -398,11 +395,11 @@ func TestReplicator_IdempotentReplay(t *testing.T) {
 	}
 
 	// Poll again — same mutation replayed, source_id unique index prevents duplicate
-	r2 := replicate.New[int64, int64](mutStore, sink, replicate.Int64Codec{},
-		replicate.WithInterval(time.Millisecond),
-		replicate.WithName("idempotent-test"),
+	r2 := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+		bridge.WithInterval(time.Millisecond),
+		bridge.WithName("idempotent-test"),
 	)
-	pollReplicator(t, r2)
+	pollBridge(t, r2)
 
 	// Still 1 entry (unique index on source_id prevented duplicate)
 	entries, err = sink.Read(ctx, "user-1")
@@ -420,11 +417,14 @@ func TestReadOnlyStream(t *testing.T) {
 	db := newTestDB(t)
 	store := newTestStore(t, db, "orders")
 
-	stream := ledger.NewStream(store, "user-1", ledger.JSONCodec[testPayload]{})
-	ros := replicate.NewReadOnlyStream(stream)
+	stream, err := ledger.NewStream(store, "user-1", ledger.JSONCodec[testPayload]{})
+	if err != nil {
+		t.Fatalf("NewStream: %v", err)
+	}
+	ros := bridge.NewReadOnlyStream(stream)
 
 	// Write ops should return ErrReadOnly
-	_, err := ros.Append(ctx, ledger.AppendInput[testPayload]{Payload: testPayload{Value: "x"}})
+	_, err = ros.Append(ctx, ledger.AppendInput[testPayload]{Payload: testPayload{Value: "x"}})
 	if !errors.Is(err, ledger.ErrReadOnly) {
 		t.Errorf("Append: expected ErrReadOnly, got %v", err)
 	}
@@ -475,7 +475,7 @@ func TestReadOnlyStream(t *testing.T) {
 	}
 }
 
-func TestReplicator_Poll(t *testing.T) {
+func TestBridge_Poll(t *testing.T) {
 	ctx := context.Background()
 
 	srcDB := newTestDB(t)
@@ -484,8 +484,8 @@ func TestReplicator_Poll(t *testing.T) {
 	sinkDB := newTestDB(t)
 	sink := newTestStore(t, sinkDB, "orders")
 
-	r := replicate.New[int64, int64](mutStore, sink, replicate.Int64Codec{},
-		replicate.WithName("poll-test"),
+	r := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+		bridge.WithName("poll-test"),
 	)
 
 	payload, _ := json.Marshal(testPayload{Value: "poll"})
@@ -514,7 +514,7 @@ func TestReplicator_Poll(t *testing.T) {
 	}
 }
 
-func TestReplicator_WithAppendOnly(t *testing.T) {
+func TestBridge_WithAppendOnly(t *testing.T) {
 	ctx := context.Background()
 
 	// Source in append-only mode: SetTags/SetAnnotations should return ErrNotSupported.
@@ -545,7 +545,7 @@ func TestReplicator_WithAppendOnly(t *testing.T) {
 	}
 }
 
-func TestReplicator_WithSkipMutationTypes(t *testing.T) {
+func TestBridge_WithSkipMutationTypes(t *testing.T) {
 	ctx := context.Background()
 
 	srcDB := newTestDB(t)
@@ -554,16 +554,16 @@ func TestReplicator_WithSkipMutationTypes(t *testing.T) {
 	sinkDB := newTestDB(t)
 	sink := newTestStore(t, sinkDB, "orders")
 
-	// Append to source and replicate.
+	// Append to source and bridge.
 	payload, _ := json.Marshal(testPayload{Value: "skip-test"})
 	ids, err := source.Append(ctx, "user-1", ledger.RawEntry[json.RawMessage]{Payload: payload, SchemaVersion: 1})
 	if err != nil {
 		t.Fatalf("source append: %v", err)
 	}
 
-	r := replicate.New[int64, int64](mutStore, sink, replicate.Int64Codec{},
-		replicate.WithName("skip-test"),
-		replicate.WithSkipMutationTypes(replicate.MutationSetTags, replicate.MutationSetAnnotations),
+	r := bridge.New[int64, int64](mutStore, sink, bridge.Int64Codec{},
+		bridge.WithName("skip-test"),
+		bridge.WithSkipMutationTypes(bridge.MutationSetTags, bridge.MutationSetAnnotations),
 	)
 	if err := r.Poll(ctx); err != nil {
 		t.Fatalf("Poll (append): %v", err)

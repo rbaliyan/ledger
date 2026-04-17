@@ -519,7 +519,7 @@ func (s *Store) SetAnnotations(ctx context.Context, stream string, id int64, ann
 		query := fmt.Sprintf(`SELECT annotations FROM %s WHERE stream = ? AND id = ?`, s.table)
 		var raw sql.NullString
 		if err := exec.QueryRowContext(ctx, query, stream, id).Scan(&raw); err != nil {
-			if err == sql.ErrNoRows {
+			if errors.Is(err, sql.ErrNoRows) {
 				return ledger.ErrEntryNotFound
 			}
 			return fmt.Errorf("ledger/sqlite: read annotations: %w", err)
@@ -527,7 +527,9 @@ func (s *Store) SetAnnotations(ctx context.Context, stream string, id int64, ann
 
 		current := make(map[string]string)
 		if raw.Valid {
-			json.Unmarshal([]byte(raw.String), &current) //nolint:errcheck
+			if err := json.Unmarshal([]byte(raw.String), &current); err != nil {
+				return fmt.Errorf("ledger/sqlite: unmarshal annotations: %w", err)
+			}
 		}
 
 		// Merge: set or delete.
@@ -670,11 +672,21 @@ func (s *Store) GetCursor(ctx context.Context, name string) (string, bool, error
 }
 
 // SetCursor persists the replication cursor for the given name.
+// The cursor is only advanced — if the stored cursor is already at or past the given
+// value, the write is a no-op. This prevents a lagging Bridge instance from regressing
+// the cursor position set by a faster instance.
+//
+// Note: comparison is lexicographic (TEXT). For int64 decimal cursors this is correct
+// once IDs reach two or more digits of the same length; any minor regression at
+// single-digit vs multi-digit boundaries causes idempotent replay only.
 func (s *Store) SetCursor(ctx context.Context, name, cursor string) error {
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
 	}
-	query := fmt.Sprintf(`INSERT INTO %s_cursors (name, cursor) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET cursor = excluded.cursor`, s.table) // #nosec G201 -- table name validated by ValidateName
+	query := fmt.Sprintf( // #nosec G201 -- table name validated by ValidateName
+		`INSERT INTO %s_cursors (name, cursor) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET cursor = excluded.cursor WHERE excluded.cursor > %s_cursors.cursor`,
+		s.table, s.table,
+	)
 	if _, err := s.db.ExecContext(ctx, query, name, cursor); err != nil {
 		return fmt.Errorf("ledger/sqlite: set cursor: %w", err)
 	}

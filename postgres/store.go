@@ -622,11 +622,21 @@ func (s *Store) GetCursor(ctx context.Context, name string) (string, bool, error
 }
 
 // SetCursor persists the replication cursor for the given name.
+// The cursor is only advanced — if the stored cursor is already at or past the given
+// value, the write is a no-op. This prevents a lagging Bridge instance from regressing
+// the cursor position set by a faster instance.
+//
+// Note: comparison is lexicographic (TEXT). For int64 decimal cursors this is correct
+// once IDs reach two or more digits of the same length; any minor regression at
+// single-digit vs multi-digit boundaries causes idempotent replay only.
 func (s *Store) SetCursor(ctx context.Context, name, cursor string) error {
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
 	}
-	query := fmt.Sprintf(`INSERT INTO %s_cursors (name, cursor) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET cursor = EXCLUDED.cursor`, s.table) // #nosec G201 -- table name validated by ValidateName
+	query := fmt.Sprintf( // #nosec G201 -- table name validated by ValidateName
+		`INSERT INTO %s_cursors (name, cursor) VALUES ($1, $2) ON CONFLICT (name) DO UPDATE SET cursor = EXCLUDED.cursor WHERE EXCLUDED.cursor > %s_cursors.cursor`,
+		s.table, s.table,
+	)
 	if _, err := s.db.ExecContext(ctx, query, name, cursor); err != nil {
 		return fmt.Errorf("ledger/postgres: set cursor: %w", err)
 	}
