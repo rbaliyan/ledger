@@ -81,6 +81,21 @@ type HealthChecker interface {
 	Health(ctx context.Context) error
 }
 
+// CursorStore is an optional interface that Store implementations may provide
+// to persist replication cursors durably alongside their data.
+// The cursor is a string-serialized store ID tracking progress through a mutation log.
+type CursorStore interface {
+	GetCursor(ctx context.Context, name string) (string, bool, error)
+	SetCursor(ctx context.Context, name string, cursor string) error
+}
+
+// SourceIDLookup is an optional interface that Store implementations may provide
+// to resolve a sink entry ID from its replication source ID.
+// Used by the replicator to apply SetTags and SetAnnotations mutations.
+type SourceIDLookup[I comparable] interface {
+	FindBySourceID(ctx context.Context, stream, sourceID string) (I, bool, error)
+}
+
 // RawEntry is an entry with an already-encoded payload, ready for storage.
 // P is the store-native payload type.
 type RawEntry[P any] struct {
