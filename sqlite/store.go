@@ -179,7 +179,7 @@ func (s *Store) migrateSchema(ctx context.Context) error {
 		return fmt.Errorf("ledger/sqlite: create cursors table: %w", err)
 	}
 	// Create source_id index (idempotent).
-	idx := fmt.Sprintf(`CREATE UNIQUE INDEX IF NOT EXISTS idx_%s_source ON %s(source_id) WHERE source_id != ''`, s.table, s.table) //nolint:gosec // table name validated by ValidateName
+	idx := fmt.Sprintf(`CREATE UNIQUE INDEX IF NOT EXISTS idx_%s_source ON %s(source_id) WHERE source_id != ''`, s.table, s.table) // #nosec G201 -- table name validated by ValidateName
 	if _, err := s.db.ExecContext(ctx, idx); err != nil {
 		return fmt.Errorf("ledger/sqlite: create source index: %w", err)
 	}
@@ -666,7 +666,7 @@ func (s *Store) SetCursor(ctx context.Context, name, cursor string) error {
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
 	}
-	query := fmt.Sprintf(`INSERT INTO %s_cursors (name, cursor) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET cursor = excluded.cursor`, s.table) //nolint:gosec // table name validated by ValidateName
+	query := fmt.Sprintf(`INSERT INTO %s_cursors (name, cursor) VALUES (?, ?) ON CONFLICT (name) DO UPDATE SET cursor = excluded.cursor`, s.table) // #nosec G201 -- table name validated by ValidateName
 	if _, err := s.db.ExecContext(ctx, query, name, cursor); err != nil {
 		return fmt.Errorf("ledger/sqlite: set cursor: %w", err)
 	}
