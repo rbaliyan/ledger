@@ -198,8 +198,6 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		return nil, nil
 	}
 
-	srcIDs := internalReplication.SourceIDsFromContext(ctx)
-
 	ctx = s.sessionCtx(ctx)
 	now := time.Now().UTC()
 	docs := make([]entry, len(entries))
@@ -207,10 +205,6 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		tags := e.Tags
 		if tags == nil {
 			tags = []string{}
-		}
-		var srcID string
-		if i < len(srcIDs) {
-			srcID = srcIDs[i]
 		}
 		docs[i] = entry{
 			ID:            bson.NewObjectID(),
@@ -221,7 +215,7 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 			SchemaVersion: e.SchemaVersion,
 			Metadata:      e.Metadata,
 			Tags:          tags,
-			SourceID:      srcID,
+			SourceID:      e.SourceID,
 			CreatedAt:     now,
 		}
 	}

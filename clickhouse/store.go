@@ -30,13 +30,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync/atomic"
 	"time"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2" // register "clickhouse" driver
 	"github.com/rbaliyan/ledger"
-	internalReplication "github.com/rbaliyan/ledger/internal/replication"
 )
 
 var (
@@ -51,20 +51,27 @@ var (
 type Store struct {
 	db     *sql.DB
 	table  string
+	logger *slog.Logger
 	closed atomic.Bool
 }
 
 // Option configures the ClickHouse store.
-type Option func(*storeOptions)
+type Option func(*options)
 
-type storeOptions struct {
-	table string
+type options struct {
+	table  string
+	logger *slog.Logger
 }
 
 // WithTable sets the table name. Defaults to "ledger_entries".
 // The name must be a valid identifier (alphanumeric and underscore only).
 func WithTable(name string) Option {
-	return func(o *storeOptions) { o.table = name }
+	return func(o *options) { o.table = name }
+}
+
+// WithLogger sets the structured logger. Defaults to slog.Default().
+func WithLogger(l *slog.Logger) Option {
+	return func(o *options) { o.logger = l }
 }
 
 // New creates a ClickHouse ledger store. The table and cursors table are
@@ -74,14 +81,14 @@ func New(ctx context.Context, db *sql.DB, opts ...Option) (*Store, error) {
 	if db == nil {
 		return nil, fmt.Errorf("ledger/clickhouse: db must not be nil")
 	}
-	o := storeOptions{table: "ledger_entries"}
+	o := options{table: "ledger_entries", logger: slog.Default()}
 	for _, fn := range opts {
 		fn(&o)
 	}
 	if err := ledger.ValidateName(o.table); err != nil {
 		return nil, fmt.Errorf("ledger/clickhouse: %w", err)
 	}
-	s := &Store{db: db, table: o.table}
+	s := &Store{db: db, table: o.table, logger: o.logger}
 	if err := s.createTable(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/clickhouse: create table: %w", err)
 	}
@@ -136,9 +143,9 @@ func generateID() string {
 	return fmt.Sprintf("%016x%02x%02x%02x%02x", ts, b[0], b[1], b[2], b[3])
 }
 
-// Append inserts entries into the named stream. Tags are stored as a JSON array
-// string. The returned IDs are the ClickHouse row IDs (source_id when
-// replicating, otherwise a generated time-ordered ID).
+// Append inserts entries into the named stream as a single batch transaction.
+// Tags are stored as a JSON array string. The returned IDs are the ClickHouse
+// row IDs (source_id when replicating, otherwise a generated time-ordered ID).
 func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.RawEntry[json.RawMessage]) ([]string, error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
@@ -147,20 +154,25 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		return nil, nil
 	}
 
-	srcIDs := internalReplication.SourceIDsFromContext(ctx)
-
-	ids := make([]string, len(entries))
 	query := fmt.Sprintf( // #nosec G201 -- table name validated by ValidateName
 		`INSERT INTO %s (id, stream, payload, order_key, dedup_key, schema_version, metadata, tags, source_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		s.table,
 	)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("ledger/clickhouse: begin tx: %w", err)
+	}
+	stmt, err := tx.PrepareContext(ctx, query)
+	if err != nil {
+		tx.Rollback() //nolint:errcheck
+		return nil, fmt.Errorf("ledger/clickhouse: prepare: %w", err)
+	}
+	defer stmt.Close()
+
 	now := time.Now().UTC()
+	ids := make([]string, len(entries))
 	for i, e := range entries {
-		var srcID string
-		if i < len(srcIDs) {
-			srcID = srcIDs[i]
-		}
-		id := srcID
+		id := e.SourceID
 		if id == "" {
 			id = generateID()
 		}
@@ -179,10 +191,14 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 			}
 		}
 
-		if _, err := s.db.ExecContext(ctx, query, id, stream, string(e.Payload),
-			e.OrderKey, e.DedupKey, e.SchemaVersion, metadata, tags, srcID, now); err != nil {
+		if _, err := stmt.ExecContext(ctx, id, stream, string(e.Payload),
+			e.OrderKey, e.DedupKey, e.SchemaVersion, metadata, tags, e.SourceID, now); err != nil {
+			tx.Rollback() //nolint:errcheck
 			return nil, fmt.Errorf("ledger/clickhouse: append entry %d: %w", i, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("ledger/clickhouse: commit: %w", err)
 	}
 	return ids, nil
 }
