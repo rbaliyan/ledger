@@ -209,8 +209,6 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		return nil, nil
 	}
 
-	srcIDs := internalReplication.SourceIDsFromContext(ctx)
-
 	exec := s.executor(ctx)
 
 	var ownTx *sql.Tx
@@ -244,7 +242,7 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 	var appended []appendedEntry
 
 	var ids []int64
-	for i, e := range entries {
+	for _, e := range entries {
 		meta, err := encodeJSONB(e.Metadata)
 		if err != nil {
 			return nil, fmt.Errorf("ledger/postgres: encode metadata: %w", err)
@@ -255,13 +253,8 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		}
 		tagsJSON, _ := json.Marshal(tags)
 
-		var srcID string
-		if i < len(srcIDs) {
-			srcID = srcIDs[i]
-		}
-
 		var id int64
-		err = stmt.QueryRowContext(ctx, stream, []byte(e.Payload), e.OrderKey, e.DedupKey, e.SchemaVersion, meta, tagsJSON, srcID).Scan(&id)
+		err = stmt.QueryRowContext(ctx, stream, []byte(e.Payload), e.OrderKey, e.DedupKey, e.SchemaVersion, meta, tagsJSON, e.SourceID).Scan(&id)
 		if errors.Is(err, sql.ErrNoRows) {
 			s.logger.DebugContext(ctx, "dedup skip", "stream", stream, "dedup_key", e.DedupKey)
 			continue
@@ -477,31 +470,41 @@ func (s *Store) SetAnnotations(ctx context.Context, stream string, id int64, ann
 		return ledger.ErrNotSupported
 	}
 	return s.withMutTx(ctx, func(ctx context.Context, exec sqlExecutor) error {
-		// Read current
-		var raw []byte
-		err := exec.QueryRowContext(ctx, fmt.Sprintf(`SELECT COALESCE(annotations, '{}'::jsonb) FROM %s WHERE stream = $1 AND id = $2`, s.table), stream, id).Scan(&raw)
-		if errors.Is(err, sql.ErrNoRows) {
-			return ledger.ErrEntryNotFound
-		}
-		if err != nil {
-			return fmt.Errorf("ledger/postgres: read annotations: %w", err)
-		}
-
-		current := make(map[string]string)
-		json.Unmarshal(raw, &current) //nolint:errcheck
-
+		// Build merge map (keys to set) and delete list (keys with nil values).
+		mergeMap := make(map[string]string)
+		deleteKeys := []string{}
 		for k, v := range annotations {
 			if v == nil {
-				delete(current, k)
+				deleteKeys = append(deleteKeys, k)
 			} else {
-				current[k] = *v
+				mergeMap[k] = *v
 			}
 		}
-
-		data, _ := json.Marshal(current)
-		_, err = exec.ExecContext(ctx, fmt.Sprintf(`UPDATE %s SET annotations = $1::jsonb, updated_at = now() WHERE stream = $2 AND id = $3`, s.table), string(data), stream, id)
+		mergeJSON, err := json.Marshal(mergeMap)
+		if err != nil {
+			return fmt.Errorf("ledger/postgres: encode annotations: %w", err)
+		}
+		deleteJSON, err := json.Marshal(deleteKeys)
+		if err != nil {
+			return fmt.Errorf("ledger/postgres: encode delete keys: %w", err)
+		}
+		// Atomic JSONB merge then subtract deleted keys — no read-modify-write race.
+		// ARRAY(SELECT ...) converts the JSON array to a PostgreSQL text[].
+		query := fmt.Sprintf(
+			`UPDATE %s SET
+				annotations = (COALESCE(annotations, '{}'::jsonb) || $1::jsonb)
+				              - ARRAY(SELECT jsonb_array_elements_text($2::jsonb)),
+				updated_at = now()
+			WHERE stream = $3 AND id = $4`,
+			s.table,
+		)
+		res, err := exec.ExecContext(ctx, query, string(mergeJSON), string(deleteJSON), stream, id)
 		if err != nil {
 			return fmt.Errorf("ledger/postgres: set annotations: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			return ledger.ErrEntryNotFound
 		}
 
 		if s.mutationLog != nil {

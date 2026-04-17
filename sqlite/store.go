@@ -235,8 +235,6 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 		return nil, nil
 	}
 
-	srcIDs := internalReplication.SourceIDsFromContext(ctx)
-
 	exec := s.executor(ctx)
 
 	var ownTx *sql.Tx
@@ -267,7 +265,7 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 	var appended []appendedEntry
 
 	var ids []int64
-	for i, e := range entries {
+	for _, e := range entries {
 		meta, err := encodeNullableJSON(e.Metadata)
 		if err != nil {
 			return nil, fmt.Errorf("ledger/sqlite: encode metadata: %w", err)
@@ -280,12 +278,7 @@ func (s *Store) Append(ctx context.Context, stream string, entries ...ledger.Raw
 			tagsJSON = []byte("[]")
 		}
 
-		var srcID string
-		if i < len(srcIDs) {
-			srcID = srcIDs[i]
-		}
-
-		res, err := stmt.ExecContext(ctx, stream, []byte(e.Payload), e.OrderKey, e.DedupKey, e.SchemaVersion, meta, string(tagsJSON), srcID)
+		res, err := stmt.ExecContext(ctx, stream, []byte(e.Payload), e.OrderKey, e.DedupKey, e.SchemaVersion, meta, string(tagsJSON), e.SourceID)
 		if err != nil {
 			return nil, fmt.Errorf("ledger/sqlite: insert: %w", err)
 		}

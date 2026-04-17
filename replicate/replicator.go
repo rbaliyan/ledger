@@ -5,11 +5,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/rbaliyan/ledger"
 	internalReplication "github.com/rbaliyan/ledger/internal/replication"
 )
+
+// Stats holds replication counters accumulated since the Replicator started.
+type Stats struct {
+	PollCount   int64
+	ApplyCount  int64
+	SkipCount   int64
+	ErrorCount  int64
+	LastPollErr error
+}
 
 // Replicator polls a source mutation log and applies changes to a sink store.
 // SI is the source store ID type; DI is the sink store ID type.
@@ -30,18 +41,25 @@ type Replicator[SI comparable, DI comparable] struct {
 	logger            *slog.Logger
 	skipMutationTypes map[MutationType]struct{}
 
-	stop    chan struct{}
-	stopped chan struct{}
+	startOnce  sync.Once
+	stopOnce   sync.Once
+	started    atomic.Bool
+	stop       chan struct{}
+	stopped    chan struct{}
+	pollCount  atomic.Int64
+	applyCount atomic.Int64
+	skipCount  atomic.Int64
+	errorCount atomic.Int64
 }
 
 // ReplicatorOption configures a Replicator.
 type ReplicatorOption func(*replicatorOptions)
 
 type replicatorOptions struct {
-	name             string
-	interval         time.Duration
-	batchSize        int
-	logger           *slog.Logger
+	name              string
+	interval          time.Duration
+	batchSize         int
+	logger            *slog.Logger
 	skipMutationTypes map[MutationType]struct{}
 }
 
@@ -128,20 +146,45 @@ func New[SI comparable, DI comparable](
 	}
 	r.sinkCursor, _ = sink.(ledger.CursorStore)
 	r.sinkLookup, _ = sink.(ledger.SourceIDLookup[DI])
+	if r.sinkCursor == nil {
+		o.logger.Warn("replicator sink does not implement CursorStore; replication progress will not be persisted across restarts", "cursor_name", o.name)
+	}
 	return r
 }
 
-// Start begins replication in a background goroutine. Call Stop to shut it down.
-// The provided context controls background goroutine lifetime; cancelling it is
-// equivalent to calling Stop.
+// Start begins replication in a background goroutine. Safe to call once; subsequent
+// calls are no-ops. The provided context controls goroutine lifetime; cancelling it
+// is equivalent to calling Stop.
 func (r *Replicator[SI, DI]) Start(ctx context.Context) {
-	go r.run(ctx)
+	r.startOnce.Do(func() {
+		r.started.Store(true)
+		go r.run(ctx)
+	})
 }
 
 // Stop signals the replicator to stop and waits for it to exit.
+// Safe to call multiple times. If Start was never called, Stop returns immediately.
 func (r *Replicator[SI, DI]) Stop() {
-	close(r.stop)
-	<-r.stopped
+	r.stopOnce.Do(func() { close(r.stop) })
+	if r.started.Load() {
+		<-r.stopped
+	}
+}
+
+// Poll runs a single replication cycle and returns any error. Safe to call
+// concurrently with Start/Stop — it does not affect the polling goroutine.
+func (r *Replicator[SI, DI]) Poll(ctx context.Context) error {
+	return r.poll(ctx)
+}
+
+// Stats returns a snapshot of the replication counters.
+func (r *Replicator[SI, DI]) Stats() Stats {
+	return Stats{
+		PollCount:  r.pollCount.Load(),
+		ApplyCount: r.applyCount.Load(),
+		SkipCount:  r.skipCount.Load(),
+		ErrorCount: r.errorCount.Load(),
+	}
 }
 
 func (r *Replicator[SI, DI]) run(ctx context.Context) {
@@ -156,6 +199,7 @@ func (r *Replicator[SI, DI]) run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			if err := r.poll(ctx); err != nil {
+				r.errorCount.Add(1)
 				r.logger.Warn("replication poll failed", "error", err, "cursor_name", r.name)
 			}
 		}
@@ -163,6 +207,8 @@ func (r *Replicator[SI, DI]) run(ctx context.Context) {
 }
 
 func (r *Replicator[SI, DI]) poll(ctx context.Context) error {
+	r.pollCount.Add(1)
+
 	cursor := r.codec.Zero()
 	if r.sinkCursor != nil {
 		s, ok, err := r.sinkCursor.GetCursor(ctx, r.name)
@@ -208,9 +254,11 @@ func (r *Replicator[SI, DI]) poll(ctx context.Context) error {
 
 func (r *Replicator[SI, DI]) apply(ctx context.Context, evt MutationEvent) error {
 	if _, skip := r.skipMutationTypes[evt.Type]; skip {
+		r.skipCount.Add(1)
 		r.logger.Debug("skipping mutation type", "type", evt.Type, "stream", evt.Stream)
 		return nil
 	}
+	r.applyCount.Add(1)
 	switch evt.Type {
 	case MutationAppend:
 		return r.applyAppend(ctx, evt)
@@ -222,7 +270,7 @@ func (r *Replicator[SI, DI]) apply(ctx context.Context, evt MutationEvent) error
 		return r.applyTrim(ctx, evt)
 	default:
 		r.logger.Warn("unknown mutation type, skipping", "type", evt.Type)
-		return nil
+		return ledger.ErrNotSupported
 	}
 }
 
@@ -231,7 +279,6 @@ func (r *Replicator[SI, DI]) applyAppend(ctx context.Context, evt MutationEvent)
 		return nil
 	}
 	raw := make([]ledger.RawEntry[json.RawMessage], len(evt.Entries))
-	sourceIDs := make([]string, len(evt.Entries))
 	for i, e := range evt.Entries {
 		raw[i] = ledger.RawEntry[json.RawMessage]{
 			Payload:       e.Payload,
@@ -240,10 +287,9 @@ func (r *Replicator[SI, DI]) applyAppend(ctx context.Context, evt MutationEvent)
 			SchemaVersion: e.SchemaVersion,
 			Metadata:      e.Metadata,
 			Tags:          e.Tags,
+			SourceID:      e.ID,
 		}
-		sourceIDs[i] = e.ID
 	}
-	ctx = internalReplication.WithSourceIDs(ctx, sourceIDs)
 	_, err := r.sink.Append(ctx, evt.Stream, raw...)
 	return err
 }

@@ -474,3 +474,132 @@ func TestReadOnlyStream(t *testing.T) {
 		t.Errorf("expected value 'readable', got %q", entries[0].Payload.Value)
 	}
 }
+
+func TestReplicator_Poll(t *testing.T) {
+	ctx := context.Background()
+
+	srcDB := newTestDB(t)
+	source, mutStore := newSourceWithMutLog(t, srcDB)
+
+	sinkDB := newTestDB(t)
+	sink := newTestStore(t, sinkDB, "orders")
+
+	r := replicate.New[int64, int64](mutStore, sink, replicate.Int64Codec{},
+		replicate.WithName("poll-test"),
+	)
+
+	payload, _ := json.Marshal(testPayload{Value: "poll"})
+	if _, err := source.Append(ctx, "user-1", ledger.RawEntry[json.RawMessage]{Payload: payload, SchemaVersion: 1}); err != nil {
+		t.Fatalf("source append: %v", err)
+	}
+
+	if err := r.Poll(ctx); err != nil {
+		t.Fatalf("Poll: %v", err)
+	}
+
+	entries, err := sink.Read(ctx, "user-1")
+	if err != nil {
+		t.Fatalf("sink read: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry after Poll, got %d", len(entries))
+	}
+
+	stats := r.Stats()
+	if stats.PollCount != 1 {
+		t.Errorf("expected PollCount=1, got %d", stats.PollCount)
+	}
+	if stats.ApplyCount != 1 {
+		t.Errorf("expected ApplyCount=1, got %d", stats.ApplyCount)
+	}
+}
+
+func TestReplicator_WithAppendOnly(t *testing.T) {
+	ctx := context.Background()
+
+	// Source in append-only mode: SetTags/SetAnnotations should return ErrNotSupported.
+	srcDB := newTestDB(t)
+	appendOnlySource, err := sqlite.New(ctx, srcDB, sqlite.WithTable("orders"), sqlite.WithAppendOnly())
+	if err != nil {
+		t.Fatalf("new append-only source: %v", err)
+	}
+	t.Cleanup(func() { appendOnlySource.Close(ctx) })
+
+	payload, _ := json.Marshal(testPayload{Value: "append-only"})
+	if _, err := appendOnlySource.Append(ctx, "user-1", ledger.RawEntry[json.RawMessage]{Payload: payload, SchemaVersion: 1}); err != nil {
+		t.Fatalf("append: %v", err)
+	}
+
+	ids, _ := appendOnlySource.Read(ctx, "user-1")
+	if len(ids) == 0 {
+		t.Fatal("no entries")
+	}
+
+	if err := appendOnlySource.SetTags(ctx, "user-1", ids[0].ID, []string{"tag"}); !errors.Is(err, ledger.ErrNotSupported) {
+		t.Errorf("SetTags: expected ErrNotSupported, got %v", err)
+	}
+
+	v := "val"
+	if err := appendOnlySource.SetAnnotations(ctx, "user-1", ids[0].ID, map[string]*string{"k": &v}); !errors.Is(err, ledger.ErrNotSupported) {
+		t.Errorf("SetAnnotations: expected ErrNotSupported, got %v", err)
+	}
+}
+
+func TestReplicator_WithSkipMutationTypes(t *testing.T) {
+	ctx := context.Background()
+
+	srcDB := newTestDB(t)
+	source, mutStore := newSourceWithMutLog(t, srcDB)
+
+	sinkDB := newTestDB(t)
+	sink := newTestStore(t, sinkDB, "orders")
+
+	// Append to source and replicate.
+	payload, _ := json.Marshal(testPayload{Value: "skip-test"})
+	ids, err := source.Append(ctx, "user-1", ledger.RawEntry[json.RawMessage]{Payload: payload, SchemaVersion: 1})
+	if err != nil {
+		t.Fatalf("source append: %v", err)
+	}
+
+	r := replicate.New[int64, int64](mutStore, sink, replicate.Int64Codec{},
+		replicate.WithName("skip-test"),
+		replicate.WithSkipMutationTypes(replicate.MutationSetTags, replicate.MutationSetAnnotations),
+	)
+	if err := r.Poll(ctx); err != nil {
+		t.Fatalf("Poll (append): %v", err)
+	}
+
+	// Set tags and annotations on source — these will be in the mutation log.
+	if err := source.SetTags(ctx, "user-1", ids[0], []string{"should-be-skipped"}); err != nil {
+		t.Fatalf("source set tags: %v", err)
+	}
+	v := "val"
+	if err := source.SetAnnotations(ctx, "user-1", ids[0], map[string]*string{"k": &v}); err != nil {
+		t.Fatalf("source set annotations: %v", err)
+	}
+
+	// Poll — set_tags and set_annotations mutations should be skipped.
+	if err := r.Poll(ctx); err != nil {
+		t.Fatalf("Poll (skip): %v", err)
+	}
+
+	// Sink entry should have no tags or annotations.
+	entries, err := sink.Read(ctx, "user-1")
+	if err != nil {
+		t.Fatalf("sink read: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if len(entries[0].Tags) != 0 {
+		t.Errorf("expected no tags in sink (skipped), got %v", entries[0].Tags)
+	}
+	if len(entries[0].Annotations) != 0 {
+		t.Errorf("expected no annotations in sink (skipped), got %v", entries[0].Annotations)
+	}
+
+	stats := r.Stats()
+	if stats.SkipCount != 2 {
+		t.Errorf("expected SkipCount=2, got %d", stats.SkipCount)
+	}
+}
