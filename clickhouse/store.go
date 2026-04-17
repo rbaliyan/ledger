@@ -5,12 +5,12 @@
 // ClickHouse lightweight deletes (requires ClickHouse 22.8+) and is
 // asynchronous — deleted rows are physically removed during the next merge.
 //
-// # Replication sink
+// # Bridge sink
 //
 // The store implements [ledger.CursorStore] and [ledger.SourceIDLookup] so it
-// can be used as a sink with [replicate.Replicator]. Always pair it with
-// [replicate.WithSkipMutationTypes](MutationSetTags, MutationSetAnnotations)
-// on the replicator, and create the source store with [WithAppendOnly] (or the
+// can be used as a sink with [bridge.Bridge]. Always pair it with
+// [bridge.WithSkipMutationTypes](MutationSetTags, MutationSetAnnotations)
+// on the Bridge, and create the source store with [WithAppendOnly] (or the
 // equivalent option on the source backend) to prevent the source from producing
 // mutation events that the sink cannot apply.
 //
@@ -399,13 +399,26 @@ func (s *Store) GetCursor(ctx context.Context, name string) (string, bool, error
 }
 
 // SetCursor persists the replication cursor for the given name.
-// ReplacingMergeTree deduplicates by name on the next merge; FINAL on reads
-// ensures the latest value is always returned.
+// The cursor is only advanced — if the stored cursor is already at or past the
+// given value, the write is skipped. This prevents a lagging Bridge instance from
+// regressing the cursor set by a faster instance.
+//
+// ClickHouse ReplacingMergeTree has no conditional upsert, so advancement is
+// checked with a preceding read. The read-then-write window is a best-effort
+// guard; the Bridge's application-level check in advanceCursor provides an
+// additional layer of protection.
 func (s *Store) SetCursor(ctx context.Context, name, cursor string) error {
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
 	}
-	_, err := s.db.ExecContext(ctx,
+	current, ok, err := s.GetCursor(ctx, name)
+	if err != nil {
+		return fmt.Errorf("ledger/clickhouse: check cursor: %w", err)
+	}
+	if ok && current >= cursor {
+		return nil
+	}
+	_, err = s.db.ExecContext(ctx,
 		fmt.Sprintf(`INSERT INTO %s_cursors (name, cursor, updated_at) VALUES (?, ?, ?)`, s.table), // #nosec G201
 		name, cursor, time.Now().UTC(),
 	)

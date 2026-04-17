@@ -82,16 +82,18 @@ type HealthChecker interface {
 }
 
 // CursorStore is an optional interface that Store implementations may provide
-// to persist replication cursors durably alongside their data.
-// The cursor is a string-serialized store ID tracking progress through a mutation log.
+// to persist bridge progress durably alongside their data.
+// The cursor is a string-encoded store ID tracking how far the Bridge has consumed
+// the source mutation log. SetCursor must be monotonic — it should not regress
+// a cursor that was already advanced by another Bridge instance.
 type CursorStore interface {
 	GetCursor(ctx context.Context, name string) (string, bool, error)
 	SetCursor(ctx context.Context, name string, cursor string) error
 }
 
 // SourceIDLookup is an optional interface that Store implementations may provide
-// to resolve a sink entry ID from its replication source ID.
-// Used by the replicator to apply SetTags and SetAnnotations mutations.
+// to resolve a sink entry ID from its source entry ID.
+// Used by the Bridge to apply SetTags, SetAnnotations, and Trim mutations.
 type SourceIDLookup[I comparable] interface {
 	FindBySourceID(ctx context.Context, stream, sourceID string) (I, bool, error)
 }

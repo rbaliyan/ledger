@@ -1,12 +1,12 @@
-// Package replicate provides stream replication between ledger stores.
-// A Replicator polls a source store's mutation log and applies changes to a sink store.
+// Package bridge provides stream bridging between ledger stores.
+// A Bridge polls a source store's mutation log and applies changes to a sink store.
 //
 // Mutation logging must be enabled on the source store via WithMutationLog (SQLite and
-// PostgreSQL backends only). The sink store must be backed by any backend.
+// PostgreSQL backends only). The sink store may be any backend.
 //
 // Eventual consistency: tag and annotation updates may lag behind the source by up to
 // one polling interval. This is documented behaviour.
-package replicate
+package bridge
 
 import (
 	"encoding/json"
@@ -46,10 +46,12 @@ type AppendEntry struct {
 }
 
 // IDCodec serialises and deserialises store IDs to/from string for cursor storage.
+// Less must return true if a should be considered an earlier position than b.
 type IDCodec[I comparable] interface {
 	Encode(I) string
 	Decode(string) (I, error)
 	Zero() I
+	Less(a, b I) bool
 }
 
 // Int64Codec implements IDCodec[int64] for SQLite and PostgreSQL stores.
@@ -58,10 +60,14 @@ type Int64Codec struct{}
 func (Int64Codec) Encode(id int64) string         { return strconv.FormatInt(id, 10) }
 func (Int64Codec) Decode(s string) (int64, error) { return strconv.ParseInt(s, 10, 64) }
 func (Int64Codec) Zero() int64                    { return 0 }
+func (Int64Codec) Less(a, b int64) bool           { return a < b }
 
 // StringCodec implements IDCodec[string] for MongoDB stores.
+// Ordering is lexicographic, which is correct for MongoDB ObjectID hex strings
+// (first 4 bytes are a big-endian timestamp).
 type StringCodec struct{}
 
 func (StringCodec) Encode(id string) string         { return id }
 func (StringCodec) Decode(s string) (string, error) { return s, nil }
 func (StringCodec) Zero() string                    { return "" }
+func (StringCodec) Less(a, b string) bool           { return a < b }

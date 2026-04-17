@@ -88,16 +88,16 @@ func WithAppendOnly() Option {
 	return func(o *storeOptions) { o.appendOnly = true }
 }
 
-// WithMutationLog enables replication mutation logging. Every successful write
+// WithMutationLog enables mutation logging. Every successful write
 // (Append, SetTags, SetAnnotations, Trim) is recorded as a JSON event in the
-// mutation log so a [replicate.Replicator] can apply it to a sink store.
+// mutation log so a [bridge.Bridge] can apply it to a sink store.
 //
 // Use [NewJSONStore] in the same MongoDB database to keep everything in one
 // cluster. Mutation log writes share the session from [ledger.WithTx], so on
 // replica-set clusters you can make them atomic by wrapping calls in a
 // multi-document transaction. Without a transaction the writes are best-effort:
 // a crash between the main write and the mutation log write will lose that
-// replication event (the main data is still durable).
+// event (the main data is still durable).
 func WithMutationLog(mutLog ledger.Store[string, json.RawMessage]) Option {
 	return func(o *storeOptions) { o.mutationLog = mutLog }
 }
@@ -569,13 +569,18 @@ func (s *Store) GetCursor(ctx context.Context, name string) (string, bool, error
 }
 
 // SetCursor persists the replication cursor for the given name.
+// Uses MongoDB $max so the cursor only advances — if the stored cursor is already
+// at or past the given value, the update is a no-op. This prevents a lagging Bridge
+// instance from regressing the cursor position set by a faster instance.
+// $max uses lexicographic comparison for strings, which is correct for MongoDB
+// ObjectID hex cursors (time-ordered, fixed-length).
 func (s *Store) SetCursor(ctx context.Context, name, cursor string) error {
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed
 	}
 	_, err := s.cursors.UpdateOne(ctx,
 		bson.D{{Key: "_id", Value: name}},
-		bson.D{{Key: "$set", Value: bson.D{{Key: "cursor", Value: cursor}}}},
+		bson.D{{Key: "$max", Value: bson.D{{Key: "cursor", Value: cursor}}}},
 		options.UpdateOne().SetUpsert(true),
 	)
 	if err != nil {
