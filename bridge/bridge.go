@@ -163,6 +163,7 @@ func New[SI comparable, DI comparable](
 func (b *Bridge[SI, DI]) Start(ctx context.Context) {
 	b.startOnce.Do(func() {
 		b.started.Store(true)
+		b.logger.Info("bridge starting", "name", b.name, "interval", b.interval, "batch_size", b.batchSize)
 		go b.run(ctx)
 	})
 }
@@ -170,9 +171,13 @@ func (b *Bridge[SI, DI]) Start(ctx context.Context) {
 // Stop signals the Bridge to stop and waits for it to exit.
 // Safe to call multiple times. If Start was never called, Stop returns immediately.
 func (b *Bridge[SI, DI]) Stop() {
-	b.stopOnce.Do(func() { close(b.stop) })
+	b.stopOnce.Do(func() {
+		b.logger.Info("bridge stopping", "name", b.name)
+		close(b.stop)
+	})
 	if b.started.Load() {
 		<-b.stopped
+		b.logger.Info("bridge stopped", "name", b.name, "polls", b.pollCount.Load(), "applied", b.applyCount.Load(), "skipped", b.skipCount.Load(), "errors", b.errorCount.Load())
 	}
 }
 
@@ -237,6 +242,11 @@ func (b *Bridge[SI, DI]) poll(ctx context.Context) error {
 		return fmt.Errorf("read mutations: %w", err)
 	}
 
+	if len(entries) == 0 {
+		b.logger.Debug("bridge poll: no new mutations", "name", b.name)
+		return nil
+	}
+
 	var lastID SI
 	for _, e := range entries {
 		var evt MutationEvent
@@ -249,7 +259,9 @@ func (b *Bridge[SI, DI]) poll(ctx context.Context) error {
 		lastID = e.ID
 	}
 
-	if len(entries) > 0 && b.sinkCursor != nil {
+	b.logger.Debug("bridge poll: applied mutations", "name", b.name, "count", len(entries), "cursor", b.codec.Encode(lastID))
+
+	if b.sinkCursor != nil {
 		if err := b.advanceCursor(ctx, lastID); err != nil {
 			return fmt.Errorf("advance cursor: %w", err)
 		}
@@ -277,7 +289,9 @@ func (b *Bridge[SI, DI]) advanceCursor(ctx context.Context, lastID SI) error {
 	if !b.codec.Less(current, lastID) {
 		return nil
 	}
-	return b.sinkCursor.SetCursor(ctx, b.name, b.codec.Encode(lastID))
+	next := b.codec.Encode(lastID)
+	b.logger.Debug("bridge cursor advancing", "name", b.name, "from", b.codec.Encode(current), "to", next)
+	return b.sinkCursor.SetCursor(ctx, b.name, next)
 }
 
 func (b *Bridge[SI, DI]) apply(ctx context.Context, evt MutationEvent) error {
