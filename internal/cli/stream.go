@@ -14,13 +14,21 @@ import (
 	"google.golang.org/grpc/status"
 )
 
-// usageErrorf prints the command's usage to stderr and returns a formatted error.
-// Use this for flag/argument validation failures so the user sees both the
-// error message and a reminder of the correct usage.
+// UsageError is returned by commands when the user supplies bad flags or
+// arguments. main.go detects this type and skips the duplicate error print
+// (the error is already shown inline before the usage block).
+type UsageError struct{ err error }
+
+func (e UsageError) Error() string { return e.err.Error() }
+func (e UsageError) Unwrap() error { return e.err }
+
+// usageErrorf prints "Error: <msg>" followed by the command usage, then
+// returns a UsageError so main.go does not print the message a second time.
 func usageErrorf(cmd *cobra.Command, format string, args ...any) error {
 	err := fmt.Errorf(format, args...)
+	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: %s\n\n", err)
 	_ = cmd.Usage()
-	return err
+	return UsageError{err: err}
 }
 
 func newStreamCmd() *cobra.Command {
@@ -88,16 +96,13 @@ func newStreamAppendCmd() *cobra.Command {
 	var meta, tags []string
 
 	cmd := &cobra.Command{
-		Use:   "append <json-payload>",
-		Short: "Append an entry to a stream",
+		Use:   "append <payload>",
+		Short: "Append an entry to a stream (payload is JSON or a plain string)",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if stream == "" {
-				return usageErrorf(cmd, "--stream is required")
-			}
-			payload := []byte(args[0])
-			if !json.Valid(payload) {
-				return fmt.Errorf("payload is not valid JSON")
+			payload, err := toJSON(args[0])
+			if err != nil {
+				return err
 			}
 
 			kv, err := parseKV(meta)
@@ -136,7 +141,7 @@ func newStreamAppendCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream ID (required)")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
 	cmd.Flags().StringVar(&orderKey, "order-key", "", "ordering key")
 	cmd.Flags().StringVar(&dedupKey, "dedup-key", "", "deduplication key")
 	cmd.Flags().StringArrayVar(&meta, "meta", nil, "metadata as key=value pairs")
@@ -155,9 +160,6 @@ func newStreamReadCmd() *cobra.Command {
 		Use:   "read",
 		Short: "Read entries from a stream",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if stream == "" {
-				return usageErrorf(cmd, "--stream is required")
-			}
 			cfg, err := clientConfig()
 			if err != nil {
 				return err
@@ -192,7 +194,7 @@ func newStreamReadCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream ID (required)")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
 	cmd.Flags().StringVar(&after, "after", "", "cursor: only entries after this ID")
 	cmd.Flags().Int64Var(&limit, "limit", 0, "max entries (0 = server default)")
 	cmd.Flags().BoolVar(&desc, "desc", false, "newest first")
@@ -210,9 +212,6 @@ func newStreamCountCmd() *cobra.Command {
 		Use:   "count",
 		Short: "Count entries in a stream",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if stream == "" {
-				return usageErrorf(cmd, "--stream is required")
-			}
 			cfg, err := clientConfig()
 			if err != nil {
 				return err
@@ -233,7 +232,7 @@ func newStreamCountCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream ID (required)")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
 	return cmd
 }
 
@@ -247,9 +246,6 @@ func newStreamTagCmd() *cobra.Command {
 		Use:   "tag",
 		Short: "Replace all tags on an entry",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if stream == "" {
-				return usageErrorf(cmd, "--stream is required")
-			}
 			if entryID == "" {
 				return usageErrorf(cmd, "--id is required")
 			}
@@ -273,7 +269,7 @@ func newStreamTagCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream ID (required)")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
 	cmd.Flags().StringVar(&entryID, "id", "", "entry ID (required)")
 	cmd.Flags().StringArrayVarP(&tags, "tag", "t", nil, "tags (repeatable; replaces all existing tags)")
 	return cmd
@@ -289,9 +285,6 @@ func newStreamAnnotateCmd() *cobra.Command {
 		Use:   "annotate",
 		Short: "Merge annotations into an entry (key= deletes the annotation)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if stream == "" {
-				return usageErrorf(cmd, "--stream is required")
-			}
 			if entryID == "" {
 				return usageErrorf(cmd, "--id is required")
 			}
@@ -330,7 +323,7 @@ func newStreamAnnotateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream ID (required)")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
 	cmd.Flags().StringVar(&entryID, "id", "", "entry ID (required)")
 	cmd.Flags().StringArrayVar(&pairs, "set", nil, "annotation key=value to set; key= to delete (repeatable)")
 	return cmd
@@ -345,9 +338,6 @@ func newStreamTrimCmd() *cobra.Command {
 		Use:   "trim",
 		Short: "Trim entries with ID <= --before from a stream",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if stream == "" {
-				return usageErrorf(cmd, "--stream is required")
-			}
 			if beforeID == "" {
 				return usageErrorf(cmd, "--before is required")
 			}
@@ -374,7 +364,7 @@ func newStreamTrimCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream ID (required)")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
 	cmd.Flags().StringVar(&beforeID, "before", "", "trim entries with ID <= this value (required)")
 	return cmd
 }
@@ -390,9 +380,6 @@ func newStreamTailCmd() *cobra.Command {
 		Use:   "tail",
 		Short: "Continuously poll a stream and print new entries",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if stream == "" {
-				return usageErrorf(cmd, "--stream is required")
-			}
 			cfg, err := clientConfig()
 			if err != nil {
 				return err
@@ -408,7 +395,7 @@ func newStreamTailCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream ID (required)")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
 	cmd.Flags().DurationVar(&interval, "interval", 2*time.Second, "polling interval")
 	cmd.Flags().Int64Var(&limit, "limit", 50, "entries per poll")
 	return cmd
@@ -470,6 +457,17 @@ func isRetryable(err error) bool {
 	default:
 		return false
 	}
+}
+
+// toJSON returns s as a JSON byte slice. If s is already valid JSON it is
+// returned as-is; otherwise it is marshalled as a JSON string so that plain
+// text like "this is my note" is stored as the JSON string "this is my note".
+func toJSON(s string) ([]byte, error) {
+	b := []byte(s)
+	if json.Valid(b) {
+		return b, nil
+	}
+	return json.Marshal(s)
 }
 
 // parseKV converts "key=value" strings to a map.

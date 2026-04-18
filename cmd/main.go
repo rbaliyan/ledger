@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -12,7 +13,10 @@ import (
 func main() {
 	root := cli.Root()
 	if err := root.ExecuteContext(context.Background()); err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		// UsageErrors are already printed with usage by the command itself.
+		if !errors.As(err, &cli.UsageError{}) {
+			fmt.Fprintln(os.Stderr, "Error:", err)
+		}
 		os.Exit(1)
 	}
 }
