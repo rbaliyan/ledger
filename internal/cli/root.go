@@ -18,6 +18,7 @@ func Root() *cobra.Command {
 		Long: `ledger is an append-only log daemon with a gRPC API.
 
 Use 'ledger start' to run the daemon in the background,
+'ledger start --foreground' to run it in the foreground,
 'ledger stop' to shut it down, and 'ledger status' to check if it is running.
 Stream subcommands let you append, read, tag, annotate, trim, and tail streams.`,
 		SilenceUsage:  true,
@@ -29,7 +30,6 @@ Stream subcommands let you append, read, tag, annotate, trim, and tail streams.`
 	root.PersistentFlags().StringVar(&flagAddr, "addr", "", "daemon address (overrides config listen address)")
 
 	root.AddCommand(
-		newServeCmd(),
 		newStartCmd(),
 		newStopCmd(),
 		newStatusCmd(),

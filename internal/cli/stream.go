@@ -14,6 +14,15 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+// usageErrorf prints the command's usage to stderr and returns a formatted error.
+// Use this for flag/argument validation failures so the user sees both the
+// error message and a reminder of the correct usage.
+func usageErrorf(cmd *cobra.Command, format string, args ...any) error {
+	err := fmt.Errorf(format, args...)
+	_ = cmd.Usage()
+	return err
+}
+
 func newStreamCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "stream",
@@ -75,20 +84,23 @@ func newStreamListCmd() *cobra.Command {
 // ── append ──────────────────────────────────────────────────────────────────
 
 func newStreamAppendCmd() *cobra.Command {
-	var store, orderKey, dedupKey string
+	var store, stream, orderKey, dedupKey string
 	var meta, tags []string
 
 	cmd := &cobra.Command{
-		Use:   "append <stream-id> <json-payload>",
+		Use:   "append <json-payload>",
 		Short: "Append an entry to a stream",
-		Args:  cobra.ExactArgs(2),
+		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			payload := []byte(args[1])
+			if stream == "" {
+				return usageErrorf(cmd, "--stream is required")
+			}
+			payload := []byte(args[0])
 			if !json.Valid(payload) {
 				return fmt.Errorf("payload is not valid JSON")
 			}
 
-			metadata, err := parseKV(meta)
+			kv, err := parseKV(meta)
 			if err != nil {
 				return err
 			}
@@ -105,12 +117,12 @@ func newStreamAppendCmd() *cobra.Command {
 
 			ctx := storeCtx(cmd.Context(), cfg, store)
 			resp, err := client.Append(ctx, &ledgerv1.AppendRequest{
-				Stream: args[0],
+				Stream: stream,
 				Entries: []*ledgerv1.EntryInput{{
 					Payload:  payload,
 					OrderKey: orderKey,
 					DedupKey: dedupKey,
-					Metadata: metadata,
+					Metadata: kv,
 					Tags:     tags,
 				}},
 			})
@@ -124,6 +136,7 @@ func newStreamAppendCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream ID (required)")
 	cmd.Flags().StringVar(&orderKey, "order-key", "", "ordering key")
 	cmd.Flags().StringVar(&dedupKey, "dedup-key", "", "deduplication key")
 	cmd.Flags().StringArrayVar(&meta, "meta", nil, "metadata as key=value pairs")
@@ -134,15 +147,17 @@ func newStreamAppendCmd() *cobra.Command {
 // ── read ─────────────────────────────────────────────────────────────────────
 
 func newStreamReadCmd() *cobra.Command {
-	var store, after, orderKey, tag string
+	var store, stream, after, orderKey, tag string
 	var limit int64
 	var desc bool
 
 	cmd := &cobra.Command{
-		Use:   "read <stream-id>",
+		Use:   "read",
 		Short: "Read entries from a stream",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if stream == "" {
+				return usageErrorf(cmd, "--stream is required")
+			}
 			cfg, err := clientConfig()
 			if err != nil {
 				return err
@@ -155,7 +170,7 @@ func newStreamReadCmd() *cobra.Command {
 
 			ctx := storeCtx(cmd.Context(), cfg, store)
 			resp, err := client.Read(ctx, &ledgerv1.ReadRequest{
-				Stream: args[0],
+				Stream: stream,
 				Options: &ledgerv1.ReadOptions{
 					After:    after,
 					Limit:    limit,
@@ -177,6 +192,7 @@ func newStreamReadCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream ID (required)")
 	cmd.Flags().StringVar(&after, "after", "", "cursor: only entries after this ID")
 	cmd.Flags().Int64Var(&limit, "limit", 0, "max entries (0 = server default)")
 	cmd.Flags().BoolVar(&desc, "desc", false, "newest first")
@@ -188,13 +204,15 @@ func newStreamReadCmd() *cobra.Command {
 // ── count ─────────────────────────────────────────────────────────────────────
 
 func newStreamCountCmd() *cobra.Command {
-	var store string
+	var store, stream string
 
 	cmd := &cobra.Command{
-		Use:   "count <stream-id>",
+		Use:   "count",
 		Short: "Count entries in a stream",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if stream == "" {
+				return usageErrorf(cmd, "--stream is required")
+			}
 			cfg, err := clientConfig()
 			if err != nil {
 				return err
@@ -206,7 +224,7 @@ func newStreamCountCmd() *cobra.Command {
 			defer conn.Close() //nolint:errcheck
 
 			ctx := storeCtx(cmd.Context(), cfg, store)
-			resp, err := client.Count(ctx, &ledgerv1.CountRequest{Stream: args[0]})
+			resp, err := client.Count(ctx, &ledgerv1.CountRequest{Stream: stream})
 			if err != nil {
 				return err
 			}
@@ -215,19 +233,26 @@ func newStreamCountCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream ID (required)")
 	return cmd
 }
 
 // ── tag ──────────────────────────────────────────────────────────────────────
 
 func newStreamTagCmd() *cobra.Command {
-	var store string
+	var store, stream, entryID string
+	var tags []string
 
 	cmd := &cobra.Command{
-		Use:   "tag <stream-id> <entry-id> [tag ...]",
+		Use:   "tag",
 		Short: "Replace all tags on an entry",
-		Args:  cobra.MinimumNArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if stream == "" {
+				return usageErrorf(cmd, "--stream is required")
+			}
+			if entryID == "" {
+				return usageErrorf(cmd, "--id is required")
+			}
 			cfg, err := clientConfig()
 			if err != nil {
 				return err
@@ -240,27 +265,39 @@ func newStreamTagCmd() *cobra.Command {
 
 			ctx := storeCtx(cmd.Context(), cfg, store)
 			_, err = client.SetTags(ctx, &ledgerv1.SetTagsRequest{
-				Stream: args[0],
-				Id:     args[1],
-				Tags:   args[2:],
+				Stream: stream,
+				Id:     entryID,
+				Tags:   tags,
 			})
 			return err
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream ID (required)")
+	cmd.Flags().StringVar(&entryID, "id", "", "entry ID (required)")
+	cmd.Flags().StringArrayVarP(&tags, "tag", "t", nil, "tags (repeatable; replaces all existing tags)")
 	return cmd
 }
 
 // ── annotate ─────────────────────────────────────────────────────────────────
 
 func newStreamAnnotateCmd() *cobra.Command {
-	var store string
+	var store, stream, entryID string
+	var pairs []string
 
 	cmd := &cobra.Command{
-		Use:   "annotate <stream-id> <entry-id> <key=value|key=>...",
+		Use:   "annotate",
 		Short: "Merge annotations into an entry (key= deletes the annotation)",
-		Args:  cobra.MinimumNArgs(3),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if stream == "" {
+				return usageErrorf(cmd, "--stream is required")
+			}
+			if entryID == "" {
+				return usageErrorf(cmd, "--id is required")
+			}
+			if len(pairs) == 0 {
+				return fmt.Errorf("at least one --set key=value or --del key is required")
+			}
 			cfg, err := clientConfig()
 			if err != nil {
 				return err
@@ -273,9 +310,9 @@ func newStreamAnnotateCmd() *cobra.Command {
 
 			set := make(map[string]string)
 			var del []string
-			for _, kv := range args[2:] {
-				k, v, hasVal := strings.Cut(kv, "=")
-				if hasVal && v == "" {
+			for _, kv := range pairs {
+				k, v, hasEq := strings.Cut(kv, "=")
+				if hasEq && v == "" {
 					del = append(del, k)
 				} else {
 					set[k] = v
@@ -284,8 +321,8 @@ func newStreamAnnotateCmd() *cobra.Command {
 
 			ctx := storeCtx(cmd.Context(), cfg, store)
 			_, err = client.SetAnnotations(ctx, &ledgerv1.SetAnnotationsRequest{
-				Stream: args[0],
-				Id:     args[1],
+				Stream: stream,
+				Id:     entryID,
 				Set:    set,
 				Delete: del,
 			})
@@ -293,19 +330,27 @@ func newStreamAnnotateCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream ID (required)")
+	cmd.Flags().StringVar(&entryID, "id", "", "entry ID (required)")
+	cmd.Flags().StringArrayVar(&pairs, "set", nil, "annotation key=value to set; key= to delete (repeatable)")
 	return cmd
 }
 
 // ── trim ─────────────────────────────────────────────────────────────────────
 
 func newStreamTrimCmd() *cobra.Command {
-	var store string
+	var store, stream, beforeID string
 
 	cmd := &cobra.Command{
-		Use:   "trim <stream-id> <before-id>",
-		Short: "Trim entries with ID <= before-id from a stream",
-		Args:  cobra.ExactArgs(2),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		Use:   "trim",
+		Short: "Trim entries with ID <= --before from a stream",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if stream == "" {
+				return usageErrorf(cmd, "--stream is required")
+			}
+			if beforeID == "" {
+				return usageErrorf(cmd, "--before is required")
+			}
 			cfg, err := clientConfig()
 			if err != nil {
 				return err
@@ -318,8 +363,8 @@ func newStreamTrimCmd() *cobra.Command {
 
 			ctx := storeCtx(cmd.Context(), cfg, store)
 			resp, err := client.Trim(ctx, &ledgerv1.TrimRequest{
-				Stream:   args[0],
-				BeforeId: args[1],
+				Stream:   stream,
+				BeforeId: beforeID,
 			})
 			if err != nil {
 				return err
@@ -329,21 +374,25 @@ func newStreamTrimCmd() *cobra.Command {
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream ID (required)")
+	cmd.Flags().StringVar(&beforeID, "before", "", "trim entries with ID <= this value (required)")
 	return cmd
 }
 
 // ── tail ─────────────────────────────────────────────────────────────────────
 
 func newStreamTailCmd() *cobra.Command {
-	var store string
+	var store, stream string
 	var interval time.Duration
 	var limit int64
 
 	cmd := &cobra.Command{
-		Use:   "tail <stream-id>",
+		Use:   "tail",
 		Short: "Continuously poll a stream and print new entries",
-		Args:  cobra.ExactArgs(1),
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if stream == "" {
+				return usageErrorf(cmd, "--stream is required")
+			}
 			cfg, err := clientConfig()
 			if err != nil {
 				return err
@@ -355,10 +404,11 @@ func newStreamTailCmd() *cobra.Command {
 			defer conn.Close() //nolint:errcheck
 
 			ctx := storeCtx(cmd.Context(), cfg, store)
-			return tailStream(ctx, cmd.OutOrStdout(), client, args[0], limit, interval)
+			return tailStream(ctx, cmd.OutOrStdout(), client, stream, limit, interval)
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream ID (required)")
 	cmd.Flags().DurationVar(&interval, "interval", 2*time.Second, "polling interval")
 	cmd.Flags().Int64Var(&limit, "limit", 50, "entries per poll")
 	return cmd
@@ -399,7 +449,6 @@ func tailStream(
 			}
 			return err
 		}
-		// Reset backoff on success.
 		if backoff != interval {
 			backoff = interval
 			ticker.Reset(backoff)
