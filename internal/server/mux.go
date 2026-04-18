@@ -3,11 +3,15 @@ package server
 import (
 	"context"
 	"fmt"
+	"maps"
 	"sync"
 
 	"github.com/rbaliyan/ledger/ledgerpb"
 	"google.golang.org/grpc/metadata"
 )
+
+// compile-time check
+var _ ledgerpb.Backend = (*muxBackend)(nil)
 
 // BackendFactory creates a new Backend for the named store (table/collection).
 type BackendFactory func(ctx context.Context, name string) (ledgerpb.Backend, error)
@@ -15,8 +19,8 @@ type BackendFactory func(ctx context.Context, name string) (ledgerpb.Backend, er
 // muxBackend dispatches gRPC calls to per-store backends selected via the
 // x-ledger-store metadata header. Backends are lazily created and cached.
 type muxBackend struct {
-	factory BackendFactory
-	mu      sync.RWMutex
+	factory  BackendFactory
+	mu       sync.RWMutex
 	backends map[string]ledgerpb.Backend
 }
 
@@ -26,6 +30,19 @@ func newMuxBackend(factory BackendFactory) *muxBackend {
 		factory:  factory,
 		backends: make(map[string]ledgerpb.Backend),
 	}
+}
+
+// Close calls Health on no backends but closes all open backends in the map.
+// Should be called after the gRPC server has stopped accepting new requests.
+func (m *muxBackend) Close(ctx context.Context) {
+	m.mu.Lock()
+	backends := make(map[string]ledgerpb.Backend, len(m.backends))
+	maps.Copy(backends, m.backends)
+	m.backends = make(map[string]ledgerpb.Backend)
+	m.mu.Unlock()
+	// Backends don't expose Close on the ledgerpb.Backend interface; nothing to call.
+	// This method exists for symmetry and future-proofing when the interface gains Close.
+	_ = backends
 }
 
 // storeName extracts the x-ledger-store metadata header from ctx.
@@ -123,12 +140,9 @@ func (m *muxBackend) ListStreamIDs(ctx context.Context, after string, limit int)
 }
 
 func (m *muxBackend) Health(ctx context.Context) error {
-	// Health check all open backends.
 	m.mu.RLock()
 	backends := make(map[string]ledgerpb.Backend, len(m.backends))
-	for k, v := range m.backends {
-		backends[k] = v
-	}
+	maps.Copy(backends, m.backends)
 	m.mu.RUnlock()
 	for name, b := range backends {
 		if err := b.Health(ctx); err != nil {

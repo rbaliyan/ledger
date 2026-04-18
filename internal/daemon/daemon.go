@@ -9,16 +9,23 @@ import (
 	"syscall"
 )
 
-// WritePID writes the current process PID to path, creating the file if needed.
-func WritePID(path string) error {
-	data := strconv.AppendInt(nil, int64(os.Getpid()), 10)
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+// AcquirePID atomically creates the PID file and writes the current PID.
+// Returns an error (wrapping os.ErrExist) if the file already exists so
+// callers can detect a concurrent daemon start without a TOCTOU race.
+func AcquirePID(path string) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("ledger: acquire pid file %s: %w", path, err)
+	}
+	defer f.Close()
+	if _, err := fmt.Fprintf(f, "%d", os.Getpid()); err != nil {
 		return fmt.Errorf("ledger: write pid file %s: %w", path, err)
 	}
 	return nil
 }
 
-// ReadPID reads and parses the PID from path.
+// ReadPID reads and parses the PID from path. Returns 0, nil when the file
+// does not exist (daemon not running).
 func ReadPID(path string) (int, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {

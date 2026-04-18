@@ -3,6 +3,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 
@@ -30,10 +31,10 @@ type TLSConfig struct {
 
 // DBConfig selects the backend and its per-backend settings.
 type DBConfig struct {
-	Type    string         `yaml:"type"` // "sqlite", "postgres", "mongodb"
-	SQLite  SQLiteConfig   `yaml:"sqlite"`
+	Type     string        `yaml:"type"` // "sqlite", "postgres", "mongodb"
+	SQLite   SQLiteConfig  `yaml:"sqlite"`
 	Postgres PostgresConfig `yaml:"postgres"`
-	MongoDB MongoDBConfig  `yaml:"mongodb"`
+	MongoDB  MongoDBConfig  `yaml:"mongodb"`
 }
 
 // SQLiteConfig holds SQLite-specific settings.
@@ -48,19 +49,37 @@ type PostgresConfig struct {
 
 // MongoDBConfig holds MongoDB connection settings.
 type MongoDBConfig struct {
-	URI        string `yaml:"uri"`
-	Database   string `yaml:"database"`
+	URI      string `yaml:"uri"`
+	Database string `yaml:"database"`
 }
 
 // ConfigDir returns the directory from which the config was loaded,
 // or the default config directory if no config file was found.
-func (c *Config) ConfigDir() string {
-	return c.configDir
-}
+func (c *Config) ConfigDir() string { return c.configDir }
 
 // PIDFile returns the path to the daemon PID file.
 func (c *Config) PIDFile() string {
 	return filepath.Join(c.configDir, "ledger.pid")
+}
+
+// Validate checks that the config values are well-formed.
+// It is called automatically by Load and LoadFrom.
+func (c *Config) Validate() error {
+	if _, _, err := net.SplitHostPort(c.Listen); err != nil {
+		return fmt.Errorf("ledger: config: invalid listen address %q: %w", c.Listen, err)
+	}
+	switch c.DB.Type {
+	case "sqlite", "postgres", "mongodb":
+	default:
+		return fmt.Errorf("ledger: config: unknown db type %q (want sqlite|postgres|mongodb)", c.DB.Type)
+	}
+	if c.TLS.Cert != "" && c.TLS.Key == "" {
+		return fmt.Errorf("ledger: config: tls.cert requires tls.key")
+	}
+	if c.TLS.Key != "" && c.TLS.Cert == "" {
+		return fmt.Errorf("ledger: config: tls.key requires tls.cert")
+	}
+	return nil
 }
 
 // defaults fills in zero-value fields with sensible defaults.
@@ -114,6 +133,9 @@ func Load() (*Config, error) {
 			return nil, fmt.Errorf("ledger: parse config %s: %w", path, err)
 		}
 		cfg.defaults()
+		if err := cfg.Validate(); err != nil {
+			return nil, err
+		}
 		return cfg, nil
 	}
 	// No config file found — use all defaults.
@@ -133,5 +155,8 @@ func LoadFrom(path string) (*Config, error) {
 		return nil, fmt.Errorf("ledger: parse config %s: %w", path, err)
 	}
 	cfg.defaults()
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }

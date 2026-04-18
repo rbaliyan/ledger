@@ -10,6 +10,8 @@ import (
 
 	ledgerv1 "github.com/rbaliyan/ledger/api/ledger/v1"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func newStreamCmd() *cobra.Command {
@@ -64,7 +66,7 @@ func newStreamListCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&store, "store", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
 	cmd.Flags().StringVar(&after, "after", "", "cursor: list stream IDs after this value")
 	cmd.Flags().Int64Var(&limit, "limit", 0, "max results (0 = server default)")
 	return cmd
@@ -86,6 +88,11 @@ func newStreamAppendCmd() *cobra.Command {
 				return fmt.Errorf("payload is not valid JSON")
 			}
 
+			metadata, err := parseKV(meta)
+			if err != nil {
+				return err
+			}
+
 			cfg, err := clientConfig()
 			if err != nil {
 				return err
@@ -103,7 +110,7 @@ func newStreamAppendCmd() *cobra.Command {
 					Payload:  payload,
 					OrderKey: orderKey,
 					DedupKey: dedupKey,
-					Metadata: parseKV(meta),
+					Metadata: metadata,
 					Tags:     tags,
 				}},
 			})
@@ -116,11 +123,11 @@ func newStreamAppendCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&store, "store", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
 	cmd.Flags().StringVar(&orderKey, "order-key", "", "ordering key")
 	cmd.Flags().StringVar(&dedupKey, "dedup-key", "", "deduplication key")
-	cmd.Flags().StringArrayVar(&meta, "meta", nil, "metadata key=value pairs")
-	cmd.Flags().StringArrayVar(&tags, "tag", nil, "tags")
+	cmd.Flags().StringArrayVar(&meta, "meta", nil, "metadata as key=value pairs")
+	cmd.Flags().StringArrayVar(&tags, "tag", nil, "tags to apply to the entry")
 	return cmd
 }
 
@@ -162,12 +169,14 @@ func newStreamReadCmd() *cobra.Command {
 			}
 			enc := json.NewEncoder(cmd.OutOrStdout())
 			for _, e := range resp.Entries {
-				_ = enc.Encode(e)
+				if err := enc.Encode(e); err != nil {
+					return err
+				}
 			}
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&store, "store", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
 	cmd.Flags().StringVar(&after, "after", "", "cursor: only entries after this ID")
 	cmd.Flags().Int64Var(&limit, "limit", 0, "max entries (0 = server default)")
 	cmd.Flags().BoolVar(&desc, "desc", false, "newest first")
@@ -205,7 +214,7 @@ func newStreamCountCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&store, "store", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
 	return cmd
 }
 
@@ -238,7 +247,7 @@ func newStreamTagCmd() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&store, "store", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
 	return cmd
 }
 
@@ -283,7 +292,7 @@ func newStreamAnnotateCmd() *cobra.Command {
 			return err
 		},
 	}
-	cmd.Flags().StringVar(&store, "store", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
 	return cmd
 }
 
@@ -319,7 +328,7 @@ func newStreamTrimCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVar(&store, "store", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
 	return cmd
 }
 
@@ -349,7 +358,7 @@ func newStreamTailCmd() *cobra.Command {
 			return tailStream(ctx, cmd.OutOrStdout(), client, args[0], limit, interval)
 		},
 	}
-	cmd.Flags().StringVar(&store, "store", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
 	cmd.Flags().DurationVar(&interval, "interval", 2*time.Second, "polling interval")
 	cmd.Flags().Int64Var(&limit, "limit", 50, "entries per poll")
 	return cmd
@@ -365,6 +374,7 @@ func tailStream(
 ) error {
 	enc := json.NewEncoder(out)
 	var cursor string
+	backoff := interval
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 
@@ -382,24 +392,50 @@ func tailStream(
 			},
 		})
 		if err != nil {
+			if isRetryable(err) {
+				backoff = min(backoff*2, 30*time.Second)
+				ticker.Reset(backoff)
+				continue
+			}
 			return err
 		}
+		// Reset backoff on success.
+		if backoff != interval {
+			backoff = interval
+			ticker.Reset(backoff)
+		}
 		for _, e := range resp.Entries {
-			_ = enc.Encode(e)
+			if err := enc.Encode(e); err != nil {
+				return err
+			}
 			cursor = e.Id
 		}
 	}
 }
 
+// isRetryable reports whether a gRPC error is worth retrying in tail.
+func isRetryable(err error) bool {
+	switch status.Code(err) {
+	case codes.Unavailable, codes.DeadlineExceeded, codes.ResourceExhausted:
+		return true
+	default:
+		return false
+	}
+}
+
 // parseKV converts "key=value" strings to a map.
-func parseKV(pairs []string) map[string]string {
+// Returns an error if any pair does not contain "=".
+func parseKV(pairs []string) (map[string]string, error) {
 	if len(pairs) == 0 {
-		return nil
+		return nil, nil
 	}
 	m := make(map[string]string, len(pairs))
 	for _, kv := range pairs {
-		k, v, _ := strings.Cut(kv, "=")
+		k, v, ok := strings.Cut(kv, "=")
+		if !ok {
+			return nil, fmt.Errorf("invalid metadata pair %q: expected key=value", kv)
+		}
 		m[k] = v
 	}
-	return m
+	return m, nil
 }

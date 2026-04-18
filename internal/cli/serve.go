@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -27,22 +28,39 @@ func newServeCmd() *cobra.Command {
 			return runServe(cmd.Context(), cfg, foreground)
 		},
 	}
-	cmd.Flags().BoolVar(&foreground, "foreground", false, "run in the foreground (used internally by 'start')")
+	cmd.Flags().BoolVar(&foreground, "foreground", false, "keep logs on stderr instead of the configured log_file")
 	return cmd
 }
 
-func runServe(ctx context.Context, cfg *config.Config, _ bool) error {
+func runServe(ctx context.Context, cfg *config.Config, foreground bool) error {
 	if err := os.MkdirAll(cfg.ConfigDir(), 0o755); err != nil {
 		return err
 	}
 
 	pidFile := cfg.PIDFile()
-	if err := daemon.WritePID(pidFile); err != nil {
-		return err
+	if err := daemon.AcquirePID(pidFile); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			// Stale PID file — check if the process is still alive.
+			pid, _ := daemon.ReadPID(pidFile)
+			if daemon.IsAlive(pid) {
+				return errors.New("ledger daemon is already running")
+			}
+			// Stale file: remove and retry.
+			_ = daemon.RemovePID(pidFile)
+			if err := daemon.AcquirePID(pidFile); err != nil {
+				return err
+			}
+		} else {
+			return err
+		}
 	}
-	defer daemon.RemovePID(pidFile) //nolint:errcheck
+	defer func() {
+		if err := daemon.RemovePID(pidFile); err != nil {
+			slog.Warn("failed to remove pid file", "path", pidFile, "err", err)
+		}
+	}()
 
-	if cfg.LogFile != "" {
+	if !foreground && cfg.LogFile != "" {
 		f, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if err != nil {
 			return err
@@ -65,7 +83,7 @@ func runServe(ctx context.Context, cfg *config.Config, _ bool) error {
 	select {
 	case <-ctx.Done():
 		slog.Info("shutting down ledger daemon")
-		srv.Stop()
+		srv.Stop(context.Background())
 		return nil
 	case err := <-errCh:
 		return err
