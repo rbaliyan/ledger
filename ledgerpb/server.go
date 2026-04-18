@@ -149,6 +149,22 @@ func (s *Server) ListStreamIDs(ctx context.Context, req *ledgerv1.ListStreamIDsR
 	return &ledgerv1.ListStreamIDsResponse{StreamIds: ids}, nil
 }
 
+// RenameStream changes the human-readable name of a stream without touching entries.
+// Returns Unimplemented if the backend does not support renaming.
+func (s *Server) RenameStream(ctx context.Context, req *ledgerv1.RenameStreamRequest) (*ledgerv1.RenameStreamResponse, error) {
+	if req.Name == "" || req.NewName == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "name and new_name must not be empty")
+	}
+	renamer, ok := s.backend.(StreamRenamer)
+	if !ok {
+		return nil, status.Errorf(codes.Unimplemented, "backend does not support stream rename")
+	}
+	if err := renamer.RenameStream(ctx, req.Name, req.NewName); err != nil {
+		return nil, toGRPCStatus(err)
+	}
+	return &ledgerv1.RenameStreamResponse{}, nil
+}
+
 // Health reports backend connectivity. The gRPC call always succeeds; the
 // status string carries the health information ("ok" or an error description).
 func (s *Server) Health(ctx context.Context, req *ledgerv1.HealthRequest) (*ledgerv1.HealthResponse, error) {

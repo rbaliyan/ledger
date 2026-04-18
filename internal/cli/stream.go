@@ -45,6 +45,7 @@ func newStreamCmd() *cobra.Command {
 		newStreamAnnotateCmd(),
 		newStreamTrimCmd(),
 		newStreamTailCmd(),
+		newStreamRenameCmd(),
 	)
 	return cmd
 }
@@ -421,6 +422,53 @@ func newStreamTailCmd() *cobra.Command {
 	cmd.Flags().BoolVar(&jsonMode, "json", false, "print full JSON entry instead of plain text payload")
 	cmd.Flags().DurationVar(&interval, "interval", 2*time.Second, "polling interval")
 	cmd.Flags().Int64Var(&limit, "limit", 50, "entries per poll")
+	return cmd
+}
+
+// ── rename ────────────────────────────────────────────────────────────────────
+
+func newStreamRenameCmd() *cobra.Command {
+	var store, stream, to string
+
+	cmd := &cobra.Command{
+		Use:   "rename",
+		Short: "Rename a stream (updates name only; entries are unchanged)",
+		Long: `Rename a stream by changing its human-readable name.
+
+The stream's entries are not moved or modified. The old name immediately
+becomes available for reuse after a successful rename.
+
+Example:
+  ledger stream rename --stream notes --to journal`,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if to == "" {
+				return usageErrorf(cmd, "--to is required")
+			}
+			cfg, err := clientConfig()
+			if err != nil {
+				return err
+			}
+			client, conn, err := newClient(cfg)
+			if err != nil {
+				return err
+			}
+			defer conn.Close() //nolint:errcheck
+
+			ctx := storeCtx(cmd.Context(), cfg, store)
+			_, err = client.RenameStream(ctx, &ledgerv1.RenameStreamRequest{
+				Name:    stream,
+				NewName: to,
+			})
+			if err != nil {
+				return err
+			}
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "stream %q renamed to %q\n", stream, to)
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "current stream name")
+	cmd.Flags().StringVar(&to, "to", "", "new stream name (required)")
 	return cmd
 }
 

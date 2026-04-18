@@ -73,3 +73,10 @@ type Backend interface {
 	// Health reports backend connectivity. Returns nil when healthy.
 	Health(ctx context.Context) error
 }
+
+// StreamRenamer is an optional extension of Backend for backends that support
+// renaming human-readable stream names without touching entries.
+// The muxBackend in internal/server implements this interface.
+type StreamRenamer interface {
+	RenameStream(ctx context.Context, oldName, newName string) error
+}

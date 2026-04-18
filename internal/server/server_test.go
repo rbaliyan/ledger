@@ -124,6 +124,95 @@ func TestServerListStreamIDs(t *testing.T) {
 	}
 }
 
+func TestServerStreamNaming(t *testing.T) {
+	client := newTestServer(t)
+	ctx := storeCtx(t.Context(), "naming_test")
+
+	payload, _ := json.Marshal("hello")
+	if _, err := client.Append(ctx, &ledgerv1.AppendRequest{
+		Stream:  "my-stream",
+		Entries: []*ledgerv1.EntryInput{{Payload: payload}},
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	// Read entries back — stream field must be the human-readable name, not a UUID.
+	readResp, err := client.Read(ctx, &ledgerv1.ReadRequest{Stream: "my-stream"})
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(readResp.Entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(readResp.Entries))
+	}
+	if readResp.Entries[0].Stream != "my-stream" {
+		t.Errorf("entry.stream = %q, want %q", readResp.Entries[0].Stream, "my-stream")
+	}
+
+	// ListStreamIDs must return the human-readable name.
+	listResp, err := client.ListStreamIDs(ctx, &ledgerv1.ListStreamIDsRequest{})
+	if err != nil {
+		t.Fatalf("ListStreamIDs: %v", err)
+	}
+	if len(listResp.StreamIds) != 1 || listResp.StreamIds[0] != "my-stream" {
+		t.Errorf("ListStreamIDs = %v, want [my-stream]", listResp.StreamIds)
+	}
+}
+
+func TestServerRenameStream(t *testing.T) {
+	client := newTestServer(t)
+	ctx := storeCtx(t.Context(), "rename_test")
+
+	payload, _ := json.Marshal("entry")
+	if _, err := client.Append(ctx, &ledgerv1.AppendRequest{
+		Stream:  "old-name",
+		Entries: []*ledgerv1.EntryInput{{Payload: payload}},
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	// Rename the stream.
+	if _, err := client.RenameStream(ctx, &ledgerv1.RenameStreamRequest{
+		Name:    "old-name",
+		NewName: "new-name",
+	}); err != nil {
+		t.Fatalf("RenameStream: %v", err)
+	}
+
+	// Entries are accessible under the new name.
+	readResp, err := client.Read(ctx, &ledgerv1.ReadRequest{Stream: "new-name"})
+	if err != nil {
+		t.Fatalf("Read after rename: %v", err)
+	}
+	if len(readResp.Entries) != 1 {
+		t.Fatalf("expected 1 entry after rename, got %d", len(readResp.Entries))
+	}
+
+	// Old name returns nothing (it's a fresh stream with no entries).
+	readOld, err := client.Read(ctx, &ledgerv1.ReadRequest{Stream: "old-name"})
+	if err != nil {
+		t.Fatalf("Read old-name: %v", err)
+	}
+	if len(readOld.Entries) != 0 {
+		t.Errorf("expected 0 entries for old-name after rename, got %d", len(readOld.Entries))
+	}
+
+	// ListStreamIDs reflects the new name.
+	listResp, err := client.ListStreamIDs(ctx, &ledgerv1.ListStreamIDsRequest{})
+	if err != nil {
+		t.Fatalf("ListStreamIDs: %v", err)
+	}
+	// After rename, old-name was accessed (creating a new mapping), and new-name is there too.
+	found := false
+	for _, id := range listResp.StreamIds {
+		if id == "new-name" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("new-name not found in ListStreamIDs: %v", listResp.StreamIds)
+	}
+}
+
 func TestServerAPIKeyRequired(t *testing.T) {
 	cfg := &config.Config{
 		Listen: "127.0.0.1:0",

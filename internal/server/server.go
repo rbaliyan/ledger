@@ -36,7 +36,11 @@ func New(ctx context.Context, cfg *config.Config) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	mux := newMuxBackend(factory)
+	meta, err := newStreamMetaStore(ctx, db, cfg.DB.Type)
+	if err != nil {
+		return nil, fmt.Errorf("server: stream metadata: %w", err)
+	}
+	mux := newMuxBackend(factory, meta)
 	guard := &apiKeyGuard{apiKey: cfg.APIKey}
 
 	opts := []grpc.ServerOption{

@@ -41,6 +41,10 @@ service LedgerService {
   // Results are ascending by stream ID and cursor-paginated via after / limit.
   rpc ListStreamIDs(ListStreamIDsRequest) returns (ListStreamIDsResponse);
 
+  // RenameStream changes the human-readable name of a stream without touching
+  // its entries. Returns NOT_FOUND if the current name does not exist.
+  rpc RenameStream(RenameStreamRequest) returns (RenameStreamResponse);
+
   // Health reports backend connectivity. Returns status "ok" on success,
   // or a description of the problem on failure.
   rpc Health(HealthRequest) returns (HealthResponse);
@@ -233,6 +237,18 @@ message ListStreamIDsResponse {
   // stream_ids is the ordered list of distinct stream IDs with at least one entry.
   repeated string stream_ids = 1;
 }
+
+// ─── RenameStream ─────────────────────────────────────────────────────────────
+
+message RenameStreamRequest {
+  // name is the current human-readable stream name.
+  string name = 1;
+
+  // new_name is the desired new name for the stream.
+  string new_name = 2;
+}
+
+message RenameStreamResponse {}
 
 // ─── Health ──────────────────────────────────────────────────────────────────
 

@@ -26,6 +26,7 @@ const (
 	LedgerService_SetAnnotations_FullMethodName = "/ledger.v1.LedgerService/SetAnnotations"
 	LedgerService_Trim_FullMethodName           = "/ledger.v1.LedgerService/Trim"
 	LedgerService_ListStreamIDs_FullMethodName  = "/ledger.v1.LedgerService/ListStreamIDs"
+	LedgerService_RenameStream_FullMethodName   = "/ledger.v1.LedgerService/RenameStream"
 	LedgerService_Health_FullMethodName         = "/ledger.v1.LedgerService/Health"
 )
 
@@ -61,6 +62,9 @@ type LedgerServiceClient interface {
 	// Streams that have been fully trimmed are not returned.
 	// Results are ascending by stream ID and cursor-paginated via after / limit.
 	ListStreamIDs(ctx context.Context, in *ListStreamIDsRequest, opts ...grpc.CallOption) (*ListStreamIDsResponse, error)
+	// RenameStream changes the human-readable name of a stream without touching
+	// its entries. Returns NOT_FOUND if the current name does not exist.
+	RenameStream(ctx context.Context, in *RenameStreamRequest, opts ...grpc.CallOption) (*RenameStreamResponse, error)
 	// Health reports backend connectivity. Returns status "ok" on success,
 	// or a description of the problem on failure.
 	Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error)
@@ -144,6 +148,16 @@ func (c *ledgerServiceClient) ListStreamIDs(ctx context.Context, in *ListStreamI
 	return out, nil
 }
 
+func (c *ledgerServiceClient) RenameStream(ctx context.Context, in *RenameStreamRequest, opts ...grpc.CallOption) (*RenameStreamResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenameStreamResponse)
+	err := c.cc.Invoke(ctx, LedgerService_RenameStream_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *ledgerServiceClient) Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HealthResponse)
@@ -186,6 +200,9 @@ type LedgerServiceServer interface {
 	// Streams that have been fully trimmed are not returned.
 	// Results are ascending by stream ID and cursor-paginated via after / limit.
 	ListStreamIDs(context.Context, *ListStreamIDsRequest) (*ListStreamIDsResponse, error)
+	// RenameStream changes the human-readable name of a stream without touching
+	// its entries. Returns NOT_FOUND if the current name does not exist.
+	RenameStream(context.Context, *RenameStreamRequest) (*RenameStreamResponse, error)
 	// Health reports backend connectivity. Returns status "ok" on success,
 	// or a description of the problem on failure.
 	Health(context.Context, *HealthRequest) (*HealthResponse, error)
@@ -219,6 +236,9 @@ func (UnimplementedLedgerServiceServer) Trim(context.Context, *TrimRequest) (*Tr
 }
 func (UnimplementedLedgerServiceServer) ListStreamIDs(context.Context, *ListStreamIDsRequest) (*ListStreamIDsResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method ListStreamIDs not implemented")
+}
+func (UnimplementedLedgerServiceServer) RenameStream(context.Context, *RenameStreamRequest) (*RenameStreamResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method RenameStream not implemented")
 }
 func (UnimplementedLedgerServiceServer) Health(context.Context, *HealthRequest) (*HealthResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Health not implemented")
@@ -370,6 +390,24 @@ func _LedgerService_ListStreamIDs_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _LedgerService_RenameStream_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenameStreamRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LedgerServiceServer).RenameStream(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LedgerService_RenameStream_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LedgerServiceServer).RenameStream(ctx, req.(*RenameStreamRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _LedgerService_Health_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(HealthRequest)
 	if err := dec(in); err != nil {
@@ -422,6 +460,10 @@ var LedgerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "ListStreamIDs",
 			Handler:    _LedgerService_ListStreamIDs_Handler,
+		},
+		{
+			MethodName: "RenameStream",
+			Handler:    _LedgerService_RenameStream_Handler,
 		},
 		{
 			MethodName: "Health",
