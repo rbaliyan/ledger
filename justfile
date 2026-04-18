@@ -26,9 +26,10 @@ proto:
 proto-lint:
     buf lint
 
-# Build all packages
+# Build all packages and output the ledger binary to bin/ledger
 build:
     go build ./...
+    go build -o bin/ledger ./cmd
 
 # Run tests
 test:
