@@ -94,15 +94,36 @@ func newStreamListCmd() *cobra.Command {
 func newStreamAppendCmd() *cobra.Command {
 	var store, stream, orderKey, dedupKey string
 	var meta, tags []string
+	var jsonMode bool
 
 	cmd := &cobra.Command{
 		Use:   "append <payload>",
-		Short: "Append an entry to a stream (payload is JSON or a plain string)",
-		Args:  cobra.ExactArgs(1),
+		Short: "Append an entry to a stream",
+		Long: `Append an entry to a stream.
+
+By default the payload is treated as plain text and stored as a JSON string.
+Pass --json to supply a raw JSON value (object, array, number, etc.).
+
+Examples:
+  ledger stream append "this is my note"
+  ledger stream append --json '{"event":"login","user":"alice"}'
+  ledger stream append --stream orders --json '{"amount":42}'`,
+		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			payload, err := toJSON(args[0])
-			if err != nil {
-				return err
+			var (
+				payload []byte
+				err     error
+			)
+			if jsonMode {
+				payload = []byte(args[0])
+				if !json.Valid(payload) {
+					return fmt.Errorf("payload is not valid JSON (omit --json to store as plain text)")
+				}
+			} else {
+				payload, err = json.Marshal(args[0])
+				if err != nil {
+					return err
+				}
 			}
 
 			kv, err := parseKV(meta)
@@ -142,6 +163,7 @@ func newStreamAppendCmd() *cobra.Command {
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
 	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
+	cmd.Flags().BoolVar(&jsonMode, "json", false, "treat payload as a raw JSON value instead of plain text")
 	cmd.Flags().StringVar(&orderKey, "order-key", "", "ordering key")
 	cmd.Flags().StringVar(&dedupKey, "dedup-key", "", "deduplication key")
 	cmd.Flags().StringArrayVar(&meta, "meta", nil, "metadata as key=value pairs")
@@ -154,11 +176,15 @@ func newStreamAppendCmd() *cobra.Command {
 func newStreamReadCmd() *cobra.Command {
 	var store, stream, after, orderKey, tag string
 	var limit int64
-	var desc bool
+	var desc, jsonMode bool
 
 	cmd := &cobra.Command{
 		Use:   "read",
 		Short: "Read entries from a stream",
+		Long: `Read entries from a stream.
+
+By default each entry's payload is printed as plain text (one line per entry,
+prefixed with its ID). Pass --json to print the full entry as JSON instead.`,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := clientConfig()
 			if err != nil {
@@ -184,17 +210,12 @@ func newStreamReadCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
-			enc := json.NewEncoder(cmd.OutOrStdout())
-			for _, e := range resp.Entries {
-				if err := enc.Encode(e); err != nil {
-					return err
-				}
-			}
-			return nil
+			return printEntries(cmd.OutOrStdout(), resp.Entries, jsonMode)
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
 	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
+	cmd.Flags().BoolVar(&jsonMode, "json", false, "print full JSON entry instead of plain text payload")
 	cmd.Flags().StringVar(&after, "after", "", "cursor: only entries after this ID")
 	cmd.Flags().Int64Var(&limit, "limit", 0, "max entries (0 = server default)")
 	cmd.Flags().BoolVar(&desc, "desc", false, "newest first")
@@ -375,6 +396,7 @@ func newStreamTailCmd() *cobra.Command {
 	var store, stream string
 	var interval time.Duration
 	var limit int64
+	var jsonMode bool
 
 	cmd := &cobra.Command{
 		Use:   "tail",
@@ -391,11 +413,12 @@ func newStreamTailCmd() *cobra.Command {
 			defer conn.Close() //nolint:errcheck
 
 			ctx := storeCtx(cmd.Context(), cfg, store)
-			return tailStream(ctx, cmd.OutOrStdout(), client, stream, limit, interval)
+			return tailStream(ctx, cmd.OutOrStdout(), client, stream, limit, interval, jsonMode)
 		},
 	}
 	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
 	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
+	cmd.Flags().BoolVar(&jsonMode, "json", false, "print full JSON entry instead of plain text payload")
 	cmd.Flags().DurationVar(&interval, "interval", 2*time.Second, "polling interval")
 	cmd.Flags().Int64Var(&limit, "limit", 50, "entries per poll")
 	return cmd
@@ -408,8 +431,8 @@ func tailStream(
 	streamID string,
 	limit int64,
 	interval time.Duration,
+	jsonMode bool,
 ) error {
-	enc := json.NewEncoder(out)
 	var cursor string
 	backoff := interval
 	ticker := time.NewTicker(interval)
@@ -440,11 +463,11 @@ func tailStream(
 			backoff = interval
 			ticker.Reset(backoff)
 		}
-		for _, e := range resp.Entries {
-			if err := enc.Encode(e); err != nil {
-				return err
-			}
-			cursor = e.Id
+		if err := printEntries(out, resp.Entries, jsonMode); err != nil {
+			return err
+		}
+		if len(resp.Entries) > 0 {
+			cursor = resp.Entries[len(resp.Entries)-1].Id
 		}
 	}
 }
@@ -459,15 +482,40 @@ func isRetryable(err error) bool {
 	}
 }
 
-// toJSON returns s as a JSON byte slice. If s is already valid JSON it is
-// returned as-is; otherwise it is marshalled as a JSON string so that plain
-// text like "this is my note" is stored as the JSON string "this is my note".
-func toJSON(s string) ([]byte, error) {
-	b := []byte(s)
-	if json.Valid(b) {
-		return b, nil
+// printEntries writes entries to out. With jsonMode each full entry is written
+// as JSON (one object per line). Without jsonMode only the decoded payload is
+// printed, prefixed by the entry ID, making output easy to read and pipe.
+func printEntries(out io.Writer, entries []*ledgerv1.Entry, jsonMode bool) error {
+	if jsonMode {
+		enc := json.NewEncoder(out)
+		for _, e := range entries {
+			if err := enc.Encode(e); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
-	return json.Marshal(s)
+	for _, e := range entries {
+		text := decodePayload(e.Payload)
+		if _, err := fmt.Fprintf(out, "%s\t%s\n", e.Id, text); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// decodePayload converts a raw JSON payload byte slice to a human-readable
+// string. JSON strings are unwrapped (quotes removed); other values are
+// printed as compact JSON.
+func decodePayload(raw []byte) string {
+	if len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	return string(raw)
 }
 
 // parseKV converts "key=value" strings to a map.
