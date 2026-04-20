@@ -94,6 +94,22 @@ type Searcher[I comparable, P any] interface {
 	Search(ctx context.Context, stream string, query string, opts ...ReadOption) ([]StoredEntry[I, P], error)
 }
 
+// SearchIndexer is an optional interface for stores that support managed search
+// indexes. Call [SearchIndexer.EnsureSearchIndex] once at startup — after
+// constructing the store with a search-mode option — to create the backing index.
+//
+// For PostgreSQL, [postgres.WithFullTextSearch] switches Search from ILIKE to
+// tsvector/GIN; EnsureSearchIndex creates the expression-based GIN index.
+// For MongoDB, EnsureSearchIndex creates the text index required by the default
+// $text-based Search. With [mongodb.WithAtlasSearch] the index is managed outside
+// this library and EnsureSearchIndex returns an error.
+//
+// If Search is called before EnsureSearchIndex (or before the index is created
+// manually), the database returns an error — there is no silent fallback.
+type SearchIndexer interface {
+	EnsureSearchIndex(ctx context.Context) error
+}
+
 // HealthChecker is an optional interface that Store implementations may provide
 // to report backend health (e.g., database connectivity).
 type HealthChecker interface {

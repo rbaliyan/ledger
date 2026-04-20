@@ -38,6 +38,7 @@ var (
 	_ ledger.CursorStore                      = (*Store)(nil)
 	_ ledger.SourceIDLookup[int64]            = (*Store)(nil)
 	_ ledger.Searcher[int64, json.RawMessage] = (*Store)(nil)
+	_ ledger.SearchIndexer                    = (*Store)(nil)
 )
 
 // Store is a PostgreSQL ledger store.
@@ -48,6 +49,7 @@ type Store struct {
 	closed      atomic.Bool
 	mutationLog ledger.Store[int64, json.RawMessage]
 	appendOnly  bool
+	ftsEnabled  bool
 }
 
 // Option configures the PostgreSQL store.
@@ -58,6 +60,7 @@ type options struct {
 	logger      *slog.Logger
 	mutationLog ledger.Store[int64, json.RawMessage]
 	appendOnly  bool
+	ftsEnabled  bool
 }
 
 // WithTable sets the table name. Defaults to "ledger_entries".
@@ -82,6 +85,14 @@ func WithAppendOnly() Option {
 	return func(o *options) { o.appendOnly = true }
 }
 
+// WithFullTextSearch switches Search from ILIKE substring matching to PostgreSQL
+// tsvector full-text search. Call [Store.EnsureSearchIndex] once at startup to
+// create the backing GIN expression index; without the index Search still works
+// but performs a sequential scan.
+func WithFullTextSearch() Option {
+	return func(o *options) { o.ftsEnabled = true }
+}
+
 // New creates a new PostgreSQL ledger store. The table and indexes are created
 // automatically. Tag GIN indexes are created asynchronously in the background.
 func New(ctx context.Context, db *sql.DB, opts ...Option) (*Store, error) {
@@ -96,7 +107,7 @@ func New(ctx context.Context, db *sql.DB, opts ...Option) (*Store, error) {
 		return nil, fmt.Errorf("ledger/postgres: %w", err)
 	}
 
-	s := &Store{db: db, table: o.table, logger: o.logger, mutationLog: o.mutationLog, appendOnly: o.appendOnly}
+	s := &Store{db: db, table: o.table, logger: o.logger, mutationLog: o.mutationLog, appendOnly: o.appendOnly, ftsEnabled: o.ftsEnabled}
 	if err := s.createTable(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/postgres: create table: %w", err)
 	}
@@ -470,10 +481,14 @@ func (s *Store) Search(ctx context.Context, stream string, query string, opts ..
 	}
 
 	argN++
-	// Note: using encode/decode is not very efficient for searching.
-	// For production use, a dedicated FTS index should be used.
-	clauses = append(clauses, fmt.Sprintf("payload::text ILIKE $%d", argN))
-	args = append(args, "%"+query+"%")
+	if s.ftsEnabled {
+		clauses = append(clauses, fmt.Sprintf(
+			"to_tsvector('english', convert_from(payload, 'UTF8')) @@ plainto_tsquery('english', $%d)", argN))
+		args = append(args, query)
+	} else {
+		clauses = append(clauses, fmt.Sprintf("convert_from(payload, 'UTF8') ILIKE $%d", argN))
+		args = append(args, "%"+query+"%")
+	}
 
 	if o.HasAfter() {
 		after, _ := ledger.AfterValue[int64](o)
@@ -533,6 +548,30 @@ func (s *Store) Search(ctx context.Context, stream string, query string, opts ..
 		entries = append(entries, e)
 	}
 	return entries, nil
+}
+
+// EnsureSearchIndex creates the GIN expression index required for efficient
+// full-text search. Requires [WithFullTextSearch] to be set; returns an error
+// otherwise. The operation is idempotent (CREATE INDEX … IF NOT EXISTS).
+//
+// CREATE INDEX CONCURRENTLY does not block reads or writes but cannot run
+// inside a transaction. Call this once at application startup, not per request.
+func (s *Store) EnsureSearchIndex(ctx context.Context) error {
+	if s.closed.Load() {
+		return ledger.ErrStoreClosed
+	}
+	if !s.ftsEnabled {
+		return fmt.Errorf("ledger/postgres: EnsureSearchIndex requires WithFullTextSearch() option")
+	}
+	// #nosec G201 -- table name validated by ValidateName
+	idx := fmt.Sprintf(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_%s_payload_fts ON %s USING GIN(to_tsvector('english', convert_from(payload, 'UTF8')))`,
+		s.table, s.table,
+	)
+	if _, err := s.db.ExecContext(ctx, idx); err != nil {
+		return fmt.Errorf("ledger/postgres: create FTS index: %w", err)
+	}
+	return nil
 }
 
 // SetTags replaces all tags on an entry.
