@@ -30,6 +30,7 @@ Stream subcommands let you append, read, tag, annotate, trim, and tail streams.`
 	root.PersistentFlags().StringVar(&flagAddr, "addr", "", "daemon address (overrides config listen address)")
 
 	root.AddCommand(
+		newVersionCmd(),
 		newStartCmd(),
 		newStopCmd(),
 		newStatusCmd(),
