@@ -1,0 +1,114 @@
+version: 2
+
+project_name: ledger
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: ledger
+    main: ./cmd
+    binary: ledger
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/rbaliyan/ledger/internal/cli.version={{.Version}}
+      - -X github.com/rbaliyan/ledger/internal/cli.commit={{.ShortCommit}}
+      - -X github.com/rbaliyan/ledger/internal/cli.buildDate={{.Date}}
+    flags:
+      - -trimpath
+
+upx:
+  - enabled: true
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    compress: best
+    lzma: true
+
+archives:
+  - id: default
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+
+checksum:
+  name_template: "checksums.txt"
+  algorithm: sha256
+
+signs:
+  - cmd: cosign
+    signature: "${artifact}.bundle"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: all
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  groups:
+    - title: Features
+      regexp: '^.*?feat(\(.+\))??!?:.+$'
+      order: 0
+    - title: Bug Fixes
+      regexp: '^.*?fix(\(.+\))??!?:.+$'
+      order: 1
+    - title: Other
+      order: 999
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - Merge pull request
+      - Merge branch
+
+nfpms:
+  - id: packages
+    package_name: ledger
+    vendor: Rajeev Baliyan
+    homepage: https://github.com/rbaliyan/ledger
+    maintainer: Rajeev Baliyan
+    description: Append-only log daemon with gRPC API and pluggable storage backends
+    license: MIT
+    formats:
+      - deb
+      - rpm
+      - apk
+
+brews:
+  - repository:
+      owner: rbaliyan
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Formula
+    homepage: https://github.com/rbaliyan/ledger
+    description: Append-only log daemon with gRPC API and pluggable storage backends
+    license: MIT
+    test: |
+      system "#{bin}/ledger", "version"
+
+release:
+  github:
+    owner: rbaliyan
+    name: ledger
+  draft: false
+  prerelease: auto
+  name_template: "{{.Tag}}"
