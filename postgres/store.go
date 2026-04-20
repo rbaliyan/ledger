@@ -484,8 +484,11 @@ func (s *Store) Search(ctx context.Context, stream string, query string, opts ..
 
 	argN++
 	if s.ftsEnabled {
+		// encode(payload,'escape') is IMMUTABLE (unlike convert_from) and produces
+		// the original UTF-8 string for ASCII-safe JSON payloads; the same expression
+		// must be used in both the query and the GIN index created by EnsureSearchIndex.
 		clauses = append(clauses, fmt.Sprintf(
-			"to_tsvector('english', convert_from(payload, 'UTF8')) @@ plainto_tsquery('english', $%d)", argN))
+			"to_tsvector('english', encode(payload, 'escape')) @@ plainto_tsquery('english', $%d)", argN))
 		args = append(args, query)
 	} else {
 		clauses = append(clauses, fmt.Sprintf("convert_from(payload, 'UTF8') ILIKE $%d", argN))
@@ -568,9 +571,11 @@ func (s *Store) EnsureSearchIndex(ctx context.Context) error {
 	if !s.ftsEnabled {
 		return fmt.Errorf("ledger/postgres: EnsureSearchIndex requires WithFullTextSearch() option: %w", ledger.ErrNotSupported)
 	}
+	// encode(payload,'escape') is IMMUTABLE (PostgreSQL requires IMMUTABLE for index
+	// expressions). For ASCII-safe JSON payloads it produces the original string.
 	// #nosec G201 -- table name validated by ValidateName
 	idx := fmt.Sprintf(
-		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_%s_payload_fts ON %s USING GIN(to_tsvector('english', convert_from(payload, 'UTF8')))`,
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_%s_payload_fts ON %s USING GIN(to_tsvector('english', encode(payload, 'escape')))`,
 		s.table, s.table,
 	)
 	if _, err := s.db.ExecContext(ctx, idx); err != nil {

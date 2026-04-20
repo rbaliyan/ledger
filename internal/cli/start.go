@@ -57,7 +57,7 @@ func runDaemon(ctx context.Context, cfg *config.Config, readyFD int) error {
 	if _, err := os.Stat(filepath.Join(cfg.ConfigDir(), "config.yaml")); errors.Is(err, os.ErrNotExist) {
 		firstRun = true
 	}
-	if err := os.MkdirAll(cfg.ConfigDir(), 0o755); err != nil {
+	if err := os.MkdirAll(cfg.ConfigDir(), 0o750); err != nil {
 		return err
 	}
 	if firstRun {

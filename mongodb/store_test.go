@@ -143,14 +143,16 @@ func newSearchStore(t *testing.T, coll string, opts ...mongodb.Option) *mongodb.
 }
 
 // seedMongoSearch appends entries with searchable text payloads.
+// Event values use plain words (not underscores) so MongoDB $text tokeniser
+// can match individual terms like "login" or "logout".
 func seedMongoSearch(ctx context.Context, t *testing.T, store *mongodb.Store) {
 	t.Helper()
 	docs := []struct {
 		stream string
 		doc    bson.D
 	}{
-		{"stream-a", bson.D{{Key: "event", Value: "user_login"}, {Key: "user", Value: "alice"}}},
-		{"stream-a", bson.D{{Key: "event", Value: "user_logout"}, {Key: "user", Value: "alice"}}},
+		{"stream-a", bson.D{{Key: "event", Value: "login"}, {Key: "user", Value: "alice"}}},
+		{"stream-a", bson.D{{Key: "event", Value: "logout"}, {Key: "user", Value: "alice"}}},
 		{"stream-b", bson.D{{Key: "event", Value: "purchase"}, {Key: "user", Value: "bob"}, {Key: "item", Value: "widget"}}},
 	}
 	for _, d := range docs {

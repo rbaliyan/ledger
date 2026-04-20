@@ -134,8 +134,8 @@ func seedSearchEntries(ctx context.Context, t *testing.T, store interface {
 }) {
 	t.Helper()
 	payloads := []json.RawMessage{
-		json.RawMessage(`{"event":"user_login","user":"alice"}`),
-		json.RawMessage(`{"event":"user_logout","user":"alice"}`),
+		json.RawMessage(`{"event":"login","user":"alice"}`),
+		json.RawMessage(`{"event":"logout","user":"alice"}`),
 		json.RawMessage(`{"event":"purchase","user":"bob","item":"widget"}`),
 	}
 	for i, p := range payloads {
