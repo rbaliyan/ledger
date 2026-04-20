@@ -33,4 +33,7 @@ var (
 
 	// ErrStreamNotFound is returned when a named stream does not exist in the metadata store.
 	ErrStreamNotFound = errors.New("ledger: stream not found")
+
+	// ErrStreamExists is returned when a rename target name already exists in the metadata store.
+	ErrStreamExists = errors.New("ledger: stream already exists")
 )

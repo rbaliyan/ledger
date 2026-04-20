@@ -1127,6 +1127,226 @@ func (*RenameStreamResponse) Descriptor() ([]byte, []int) {
 	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{18}
 }
 
+type StatRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Stream        string                 `protobuf:"bytes,1,opt,name=stream,proto3" json:"stream,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StatRequest) Reset() {
+	*x = StatRequest{}
+	mi := &file_ledger_v1_ledger_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StatRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StatRequest) ProtoMessage() {}
+
+func (x *StatRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ledger_v1_ledger_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StatRequest.ProtoReflect.Descriptor instead.
+func (*StatRequest) Descriptor() ([]byte, []int) {
+	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *StatRequest) GetStream() string {
+	if x != nil {
+		return x.Stream
+	}
+	return ""
+}
+
+type StatResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Stream        string                 `protobuf:"bytes,1,opt,name=stream,proto3" json:"stream,omitempty"`
+	Count         int64                  `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"`
+	FirstId       string                 `protobuf:"bytes,3,opt,name=first_id,json=firstId,proto3" json:"first_id,omitempty"`
+	LastId        string                 `protobuf:"bytes,4,opt,name=last_id,json=lastId,proto3" json:"last_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StatResponse) Reset() {
+	*x = StatResponse{}
+	mi := &file_ledger_v1_ledger_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StatResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StatResponse) ProtoMessage() {}
+
+func (x *StatResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ledger_v1_ledger_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StatResponse.ProtoReflect.Descriptor instead.
+func (*StatResponse) Descriptor() ([]byte, []int) {
+	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *StatResponse) GetStream() string {
+	if x != nil {
+		return x.Stream
+	}
+	return ""
+}
+
+func (x *StatResponse) GetCount() int64 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+func (x *StatResponse) GetFirstId() string {
+	if x != nil {
+		return x.FirstId
+	}
+	return ""
+}
+
+func (x *StatResponse) GetLastId() string {
+	if x != nil {
+		return x.LastId
+	}
+	return ""
+}
+
+type SearchRequest struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// stream is the stream to search within. Empty searches all streams in the store.
+	Stream string `protobuf:"bytes,1,opt,name=stream,proto3" json:"stream,omitempty"`
+	// query is the search term. Syntax depends on the backend
+	// (substring LIKE for SQLite/PostgreSQL, $text for MongoDB).
+	Query string `protobuf:"bytes,2,opt,name=query,proto3" json:"query,omitempty"`
+	// options controls pagination and ordering of results.
+	Options       *ReadOptions `protobuf:"bytes,3,opt,name=options,proto3" json:"options,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SearchRequest) Reset() {
+	*x = SearchRequest{}
+	mi := &file_ledger_v1_ledger_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SearchRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SearchRequest) ProtoMessage() {}
+
+func (x *SearchRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_ledger_v1_ledger_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SearchRequest.ProtoReflect.Descriptor instead.
+func (*SearchRequest) Descriptor() ([]byte, []int) {
+	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *SearchRequest) GetStream() string {
+	if x != nil {
+		return x.Stream
+	}
+	return ""
+}
+
+func (x *SearchRequest) GetQuery() string {
+	if x != nil {
+		return x.Query
+	}
+	return ""
+}
+
+func (x *SearchRequest) GetOptions() *ReadOptions {
+	if x != nil {
+		return x.Options
+	}
+	return nil
+}
+
+type SearchResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Entries       []*Entry               `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SearchResponse) Reset() {
+	*x = SearchResponse{}
+	mi := &file_ledger_v1_ledger_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SearchResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SearchResponse) ProtoMessage() {}
+
+func (x *SearchResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_ledger_v1_ledger_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SearchResponse.ProtoReflect.Descriptor instead.
+func (*SearchResponse) Descriptor() ([]byte, []int) {
+	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *SearchResponse) GetEntries() []*Entry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
 type HealthRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	unknownFields protoimpl.UnknownFields
@@ -1135,7 +1355,7 @@ type HealthRequest struct {
 
 func (x *HealthRequest) Reset() {
 	*x = HealthRequest{}
-	mi := &file_ledger_v1_ledger_proto_msgTypes[19]
+	mi := &file_ledger_v1_ledger_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1147,7 +1367,7 @@ func (x *HealthRequest) String() string {
 func (*HealthRequest) ProtoMessage() {}
 
 func (x *HealthRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_ledger_v1_ledger_proto_msgTypes[19]
+	mi := &file_ledger_v1_ledger_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1160,7 +1380,7 @@ func (x *HealthRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthRequest.ProtoReflect.Descriptor instead.
 func (*HealthRequest) Descriptor() ([]byte, []int) {
-	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{19}
+	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{23}
 }
 
 type HealthResponse struct {
@@ -1173,7 +1393,7 @@ type HealthResponse struct {
 
 func (x *HealthResponse) Reset() {
 	*x = HealthResponse{}
-	mi := &file_ledger_v1_ledger_proto_msgTypes[20]
+	mi := &file_ledger_v1_ledger_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1185,7 +1405,7 @@ func (x *HealthResponse) String() string {
 func (*HealthResponse) ProtoMessage() {}
 
 func (x *HealthResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_ledger_v1_ledger_proto_msgTypes[20]
+	mi := &file_ledger_v1_ledger_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1198,7 +1418,7 @@ func (x *HealthResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HealthResponse.ProtoReflect.Descriptor instead.
 func (*HealthResponse) Descriptor() ([]byte, []int) {
-	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{20}
+	return file_ledger_v1_ledger_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *HealthResponse) GetStatus() string {
@@ -1294,10 +1514,23 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\x13RenameStreamRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x19\n" +
 	"\bnew_name\x18\x02 \x01(\tR\anewName\"\x16\n" +
-	"\x14RenameStreamResponse\"\x0f\n" +
+	"\x14RenameStreamResponse\"%\n" +
+	"\vStatRequest\x12\x16\n" +
+	"\x06stream\x18\x01 \x01(\tR\x06stream\"p\n" +
+	"\fStatResponse\x12\x16\n" +
+	"\x06stream\x18\x01 \x01(\tR\x06stream\x12\x14\n" +
+	"\x05count\x18\x02 \x01(\x03R\x05count\x12\x19\n" +
+	"\bfirst_id\x18\x03 \x01(\tR\afirstId\x12\x17\n" +
+	"\alast_id\x18\x04 \x01(\tR\x06lastId\"o\n" +
+	"\rSearchRequest\x12\x16\n" +
+	"\x06stream\x18\x01 \x01(\tR\x06stream\x12\x14\n" +
+	"\x05query\x18\x02 \x01(\tR\x05query\x120\n" +
+	"\aoptions\x18\x03 \x01(\v2\x16.ledger.v1.ReadOptionsR\aoptions\"<\n" +
+	"\x0eSearchResponse\x12*\n" +
+	"\aentries\x18\x01 \x03(\v2\x10.ledger.v1.EntryR\aentries\"\x0f\n" +
 	"\rHealthRequest\"(\n" +
 	"\x0eHealthResponse\x12\x16\n" +
-	"\x06status\x18\x01 \x01(\tR\x06status2\xf9\x04\n" +
+	"\x06status\x18\x01 \x01(\tR\x06status2\xf1\x05\n" +
 	"\rLedgerService\x12=\n" +
 	"\x06Append\x12\x18.ledger.v1.AppendRequest\x1a\x19.ledger.v1.AppendResponse\x127\n" +
 	"\x04Read\x12\x16.ledger.v1.ReadRequest\x1a\x17.ledger.v1.ReadResponse\x12:\n" +
@@ -1306,7 +1539,9 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\x0eSetAnnotations\x12 .ledger.v1.SetAnnotationsRequest\x1a!.ledger.v1.SetAnnotationsResponse\x127\n" +
 	"\x04Trim\x12\x16.ledger.v1.TrimRequest\x1a\x17.ledger.v1.TrimResponse\x12R\n" +
 	"\rListStreamIDs\x12\x1f.ledger.v1.ListStreamIDsRequest\x1a .ledger.v1.ListStreamIDsResponse\x12O\n" +
-	"\fRenameStream\x12\x1e.ledger.v1.RenameStreamRequest\x1a\x1f.ledger.v1.RenameStreamResponse\x12=\n" +
+	"\fRenameStream\x12\x1e.ledger.v1.RenameStreamRequest\x1a\x1f.ledger.v1.RenameStreamResponse\x127\n" +
+	"\x04Stat\x12\x16.ledger.v1.StatRequest\x1a\x17.ledger.v1.StatResponse\x12=\n" +
+	"\x06Search\x12\x18.ledger.v1.SearchRequest\x1a\x19.ledger.v1.SearchResponse\x12=\n" +
 	"\x06Health\x12\x18.ledger.v1.HealthRequest\x1a\x19.ledger.v1.HealthResponseB3Z1github.com/rbaliyan/ledger/api/ledger/v1;ledgerv1b\x06proto3"
 
 var (
@@ -1321,7 +1556,7 @@ func file_ledger_v1_ledger_proto_rawDescGZIP() []byte {
 	return file_ledger_v1_ledger_proto_rawDescData
 }
 
-var file_ledger_v1_ledger_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
+var file_ledger_v1_ledger_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
 var file_ledger_v1_ledger_proto_goTypes = []any{
 	(*EntryInput)(nil),             // 0: ledger.v1.EntryInput
 	(*Entry)(nil),                  // 1: ledger.v1.Entry
@@ -1342,47 +1577,57 @@ var file_ledger_v1_ledger_proto_goTypes = []any{
 	(*ListStreamIDsResponse)(nil),  // 16: ledger.v1.ListStreamIDsResponse
 	(*RenameStreamRequest)(nil),    // 17: ledger.v1.RenameStreamRequest
 	(*RenameStreamResponse)(nil),   // 18: ledger.v1.RenameStreamResponse
-	(*HealthRequest)(nil),          // 19: ledger.v1.HealthRequest
-	(*HealthResponse)(nil),         // 20: ledger.v1.HealthResponse
-	nil,                            // 21: ledger.v1.EntryInput.MetadataEntry
-	nil,                            // 22: ledger.v1.Entry.MetadataEntry
-	nil,                            // 23: ledger.v1.Entry.AnnotationsEntry
-	nil,                            // 24: ledger.v1.SetAnnotationsRequest.SetEntry
-	(*timestamppb.Timestamp)(nil),  // 25: google.protobuf.Timestamp
+	(*StatRequest)(nil),            // 19: ledger.v1.StatRequest
+	(*StatResponse)(nil),           // 20: ledger.v1.StatResponse
+	(*SearchRequest)(nil),          // 21: ledger.v1.SearchRequest
+	(*SearchResponse)(nil),         // 22: ledger.v1.SearchResponse
+	(*HealthRequest)(nil),          // 23: ledger.v1.HealthRequest
+	(*HealthResponse)(nil),         // 24: ledger.v1.HealthResponse
+	nil,                            // 25: ledger.v1.EntryInput.MetadataEntry
+	nil,                            // 26: ledger.v1.Entry.MetadataEntry
+	nil,                            // 27: ledger.v1.Entry.AnnotationsEntry
+	nil,                            // 28: ledger.v1.SetAnnotationsRequest.SetEntry
+	(*timestamppb.Timestamp)(nil),  // 29: google.protobuf.Timestamp
 }
 var file_ledger_v1_ledger_proto_depIdxs = []int32{
-	21, // 0: ledger.v1.EntryInput.metadata:type_name -> ledger.v1.EntryInput.MetadataEntry
-	22, // 1: ledger.v1.Entry.metadata:type_name -> ledger.v1.Entry.MetadataEntry
-	23, // 2: ledger.v1.Entry.annotations:type_name -> ledger.v1.Entry.AnnotationsEntry
-	25, // 3: ledger.v1.Entry.created_at:type_name -> google.protobuf.Timestamp
-	25, // 4: ledger.v1.Entry.updated_at:type_name -> google.protobuf.Timestamp
+	25, // 0: ledger.v1.EntryInput.metadata:type_name -> ledger.v1.EntryInput.MetadataEntry
+	26, // 1: ledger.v1.Entry.metadata:type_name -> ledger.v1.Entry.MetadataEntry
+	27, // 2: ledger.v1.Entry.annotations:type_name -> ledger.v1.Entry.AnnotationsEntry
+	29, // 3: ledger.v1.Entry.created_at:type_name -> google.protobuf.Timestamp
+	29, // 4: ledger.v1.Entry.updated_at:type_name -> google.protobuf.Timestamp
 	0,  // 5: ledger.v1.AppendRequest.entries:type_name -> ledger.v1.EntryInput
 	2,  // 6: ledger.v1.ReadRequest.options:type_name -> ledger.v1.ReadOptions
 	1,  // 7: ledger.v1.ReadResponse.entries:type_name -> ledger.v1.Entry
-	24, // 8: ledger.v1.SetAnnotationsRequest.set:type_name -> ledger.v1.SetAnnotationsRequest.SetEntry
-	3,  // 9: ledger.v1.LedgerService.Append:input_type -> ledger.v1.AppendRequest
-	5,  // 10: ledger.v1.LedgerService.Read:input_type -> ledger.v1.ReadRequest
-	7,  // 11: ledger.v1.LedgerService.Count:input_type -> ledger.v1.CountRequest
-	9,  // 12: ledger.v1.LedgerService.SetTags:input_type -> ledger.v1.SetTagsRequest
-	11, // 13: ledger.v1.LedgerService.SetAnnotations:input_type -> ledger.v1.SetAnnotationsRequest
-	13, // 14: ledger.v1.LedgerService.Trim:input_type -> ledger.v1.TrimRequest
-	15, // 15: ledger.v1.LedgerService.ListStreamIDs:input_type -> ledger.v1.ListStreamIDsRequest
-	17, // 16: ledger.v1.LedgerService.RenameStream:input_type -> ledger.v1.RenameStreamRequest
-	19, // 17: ledger.v1.LedgerService.Health:input_type -> ledger.v1.HealthRequest
-	4,  // 18: ledger.v1.LedgerService.Append:output_type -> ledger.v1.AppendResponse
-	6,  // 19: ledger.v1.LedgerService.Read:output_type -> ledger.v1.ReadResponse
-	8,  // 20: ledger.v1.LedgerService.Count:output_type -> ledger.v1.CountResponse
-	10, // 21: ledger.v1.LedgerService.SetTags:output_type -> ledger.v1.SetTagsResponse
-	12, // 22: ledger.v1.LedgerService.SetAnnotations:output_type -> ledger.v1.SetAnnotationsResponse
-	14, // 23: ledger.v1.LedgerService.Trim:output_type -> ledger.v1.TrimResponse
-	16, // 24: ledger.v1.LedgerService.ListStreamIDs:output_type -> ledger.v1.ListStreamIDsResponse
-	18, // 25: ledger.v1.LedgerService.RenameStream:output_type -> ledger.v1.RenameStreamResponse
-	20, // 26: ledger.v1.LedgerService.Health:output_type -> ledger.v1.HealthResponse
-	18, // [18:27] is the sub-list for method output_type
-	9,  // [9:18] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	28, // 8: ledger.v1.SetAnnotationsRequest.set:type_name -> ledger.v1.SetAnnotationsRequest.SetEntry
+	2,  // 9: ledger.v1.SearchRequest.options:type_name -> ledger.v1.ReadOptions
+	1,  // 10: ledger.v1.SearchResponse.entries:type_name -> ledger.v1.Entry
+	3,  // 11: ledger.v1.LedgerService.Append:input_type -> ledger.v1.AppendRequest
+	5,  // 12: ledger.v1.LedgerService.Read:input_type -> ledger.v1.ReadRequest
+	7,  // 13: ledger.v1.LedgerService.Count:input_type -> ledger.v1.CountRequest
+	9,  // 14: ledger.v1.LedgerService.SetTags:input_type -> ledger.v1.SetTagsRequest
+	11, // 15: ledger.v1.LedgerService.SetAnnotations:input_type -> ledger.v1.SetAnnotationsRequest
+	13, // 16: ledger.v1.LedgerService.Trim:input_type -> ledger.v1.TrimRequest
+	15, // 17: ledger.v1.LedgerService.ListStreamIDs:input_type -> ledger.v1.ListStreamIDsRequest
+	17, // 18: ledger.v1.LedgerService.RenameStream:input_type -> ledger.v1.RenameStreamRequest
+	19, // 19: ledger.v1.LedgerService.Stat:input_type -> ledger.v1.StatRequest
+	21, // 20: ledger.v1.LedgerService.Search:input_type -> ledger.v1.SearchRequest
+	23, // 21: ledger.v1.LedgerService.Health:input_type -> ledger.v1.HealthRequest
+	4,  // 22: ledger.v1.LedgerService.Append:output_type -> ledger.v1.AppendResponse
+	6,  // 23: ledger.v1.LedgerService.Read:output_type -> ledger.v1.ReadResponse
+	8,  // 24: ledger.v1.LedgerService.Count:output_type -> ledger.v1.CountResponse
+	10, // 25: ledger.v1.LedgerService.SetTags:output_type -> ledger.v1.SetTagsResponse
+	12, // 26: ledger.v1.LedgerService.SetAnnotations:output_type -> ledger.v1.SetAnnotationsResponse
+	14, // 27: ledger.v1.LedgerService.Trim:output_type -> ledger.v1.TrimResponse
+	16, // 28: ledger.v1.LedgerService.ListStreamIDs:output_type -> ledger.v1.ListStreamIDsResponse
+	18, // 29: ledger.v1.LedgerService.RenameStream:output_type -> ledger.v1.RenameStreamResponse
+	20, // 30: ledger.v1.LedgerService.Stat:output_type -> ledger.v1.StatResponse
+	22, // 31: ledger.v1.LedgerService.Search:output_type -> ledger.v1.SearchResponse
+	24, // 32: ledger.v1.LedgerService.Health:output_type -> ledger.v1.HealthResponse
+	22, // [22:33] is the sub-list for method output_type
+	11, // [11:22] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_ledger_v1_ledger_proto_init() }
@@ -1396,7 +1641,7 @@ func file_ledger_v1_ledger_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ledger_v1_ledger_proto_rawDesc), len(file_ledger_v1_ledger_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   25,
+			NumMessages:   29,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

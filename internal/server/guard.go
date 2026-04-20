@@ -34,7 +34,7 @@ func (g *apiKeyGuard) Authenticate(ctx context.Context) (ledgerpb.Identity, erro
 	if !ok {
 		return nil, status.Error(codes.Unauthenticated, "missing gRPC metadata")
 	}
-	keys := md.Get("x-api-key")
+	keys := md.Get(ledgerpb.APIKeyMetadataHeader)
 	if len(keys) == 0 || subtle.ConstantTimeCompare([]byte(keys[0]), []byte(g.apiKey)) != 1 {
 		return nil, status.Error(codes.Unauthenticated, "invalid api key")
 	}

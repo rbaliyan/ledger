@@ -40,6 +40,8 @@ func toGRPCStatus(err error) error {
 		return status.Errorf(codes.FailedPrecondition, "stream is read-only")
 	case errors.Is(err, ledger.ErrStreamNotFound):
 		return status.Errorf(codes.NotFound, "%v", err)
+	case errors.Is(err, ledger.ErrStreamExists):
+		return status.Errorf(codes.AlreadyExists, "%v", err)
 	default:
 		return status.Errorf(codes.Internal, "internal error: %v", err)
 	}

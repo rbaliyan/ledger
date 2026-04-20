@@ -58,6 +58,19 @@ func (f *fakeStore) Count(_ context.Context, stream string) (int64, error) {
 	return int64(len(f.entries[stream])), nil
 }
 
+func (f *fakeStore) Stat(_ context.Context, stream string) (ledger.StreamStat[int64], error) {
+	if f.closed {
+		return ledger.StreamStat[int64]{}, ledger.ErrStoreClosed
+	}
+	entries := f.entries[stream]
+	stat := ledger.StreamStat[int64]{Stream: stream, Count: int64(len(entries))}
+	if len(entries) > 0 {
+		stat.FirstID = entries[0].ID
+		stat.LastID = entries[len(entries)-1].ID
+	}
+	return stat, nil
+}
+
 func (f *fakeStore) SetTags(_ context.Context, stream string, id int64, _ []string) error {
 	if f.closed {
 		return ledger.ErrStoreClosed

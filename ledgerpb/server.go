@@ -4,24 +4,24 @@
 // # Wire architecture
 //
 //	client
-//	  │
+//	  │  (must set "x-ledger-store" metadata header on every request)
 //	  ▼  gRPC  (proto/ledger/v1/ledger.proto)
 //	[Server]  ──[UnaryInterceptor(guard)]──► authenticate → authorise
 //	  │
-//	  ▼  Backend interface  (string IDs · json.RawMessage payloads)
-//	[NewInt64Backend(store)]   wraps Store[int64, json.RawMessage]  (SQLite, PostgreSQL)
-//	[NewStringBackend(store)]  wraps Store[string, json.RawMessage] (MongoDB)
+//	  ▼  Provider interface  (string IDs · json.RawMessage payloads)
+//	[NewInt64Provider(store)]   wraps Store[int64, json.RawMessage]  (SQLite, PostgreSQL)
+//	[NewStringProvider(store)]  wraps Store[string, json.RawMessage] (MongoDB)
 //
 // # Quick start
 //
-//	// 1. Open the backend
+//	// 1. Open the store
 //	sqlStore, _ := sqlite.New(ctx, db)
 //
-//	// 2. Wrap as a Backend
-//	backend := ledgerpb.NewInt64Backend(sqlStore)
+//	// 2. Wrap as a Provider
+//	provider := ledgerpb.NewInt64Provider(sqlStore)
 //
 //	// 3. Create the gRPC Server
-//	srv := ledgerpb.NewServer(backend)
+//	srv := ledgerpb.NewServer(provider)
 //
 //	// 4. Register with a *grpc.Server (optionally add the security interceptor)
 //	grpcSrv := grpc.NewServer(
@@ -44,17 +44,17 @@ import (
 // compile-time check
 var _ ledgerv1.LedgerServiceServer = (*Server)(nil)
 
-// Server implements ledgerv1.LedgerServiceServer backed by a Backend.
+// Server implements ledgerv1.LedgerServiceServer backed by a Provider.
 type Server struct {
 	ledgerv1.UnimplementedLedgerServiceServer
-	backend Backend
+	provider Provider
 }
 
-// NewServer creates a LedgerService gRPC server backed by the provided Backend.
-// Use NewInt64Backend or NewStringBackend to create a Backend from an existing
+// NewServer creates a LedgerService gRPC server backed by the provided Provider.
+// Use NewInt64Provider or NewStringProvider to create a Provider from an existing
 // ledger store.
-func NewServer(backend Backend) *Server {
-	return &Server{backend: backend}
+func NewServer(provider Provider) *Server {
+	return &Server{provider: provider}
 }
 
 // Append adds entries to the named stream and returns their assigned IDs.
@@ -73,7 +73,7 @@ func (s *Server) Append(ctx context.Context, req *ledgerv1.AppendRequest) (*ledg
 			Tags:          e.Tags,
 		}
 	}
-	ids, err := s.backend.Append(ctx, req.Stream, entries...)
+	ids, err := s.provider.Append(ctx, req.Stream, entries...)
 	if err != nil {
 		return nil, toGRPCStatus(err)
 	}
@@ -86,7 +86,7 @@ func (s *Server) Read(ctx context.Context, req *ledgerv1.ReadRequest) (*ledgerv1
 		return nil, status.Errorf(codes.InvalidArgument, "stream must not be empty")
 	}
 	opts := readOptionsFromProto(req.Options)
-	stored, err := s.backend.Read(ctx, req.Stream, opts)
+	stored, err := s.provider.Read(ctx, req.Stream, opts)
 	if err != nil {
 		return nil, toGRPCStatus(err)
 	}
@@ -99,7 +99,7 @@ func (s *Server) Read(ctx context.Context, req *ledgerv1.ReadRequest) (*ledgerv1
 
 // Count returns the total number of entries in the named stream.
 func (s *Server) Count(ctx context.Context, req *ledgerv1.CountRequest) (*ledgerv1.CountResponse, error) {
-	n, err := s.backend.Count(ctx, req.Stream)
+	n, err := s.provider.Count(ctx, req.Stream)
 	if err != nil {
 		return nil, toGRPCStatus(err)
 	}
@@ -108,7 +108,7 @@ func (s *Server) Count(ctx context.Context, req *ledgerv1.CountRequest) (*ledger
 
 // SetTags replaces all tags on an existing entry.
 func (s *Server) SetTags(ctx context.Context, req *ledgerv1.SetTagsRequest) (*ledgerv1.SetTagsResponse, error) {
-	if err := s.backend.SetTags(ctx, req.Stream, req.Id, req.Tags); err != nil {
+	if err := s.provider.SetTags(ctx, req.Stream, req.Id, req.Tags); err != nil {
 		return nil, toGRPCStatus(err)
 	}
 	return &ledgerv1.SetTagsResponse{}, nil
@@ -125,7 +125,7 @@ func (s *Server) SetAnnotations(ctx context.Context, req *ledgerv1.SetAnnotation
 	for _, k := range req.Delete {
 		annotations[k] = nil
 	}
-	if err := s.backend.SetAnnotations(ctx, req.Stream, req.Id, annotations); err != nil {
+	if err := s.provider.SetAnnotations(ctx, req.Stream, req.Id, annotations); err != nil {
 		return nil, toGRPCStatus(err)
 	}
 	return &ledgerv1.SetAnnotationsResponse{}, nil
@@ -133,7 +133,7 @@ func (s *Server) SetAnnotations(ctx context.Context, req *ledgerv1.SetAnnotation
 
 // Trim deletes entries with ID <= before_id and returns the number deleted.
 func (s *Server) Trim(ctx context.Context, req *ledgerv1.TrimRequest) (*ledgerv1.TrimResponse, error) {
-	deleted, err := s.backend.Trim(ctx, req.Stream, req.BeforeId)
+	deleted, err := s.provider.Trim(ctx, req.Stream, req.BeforeId)
 	if err != nil {
 		return nil, toGRPCStatus(err)
 	}
@@ -142,11 +142,50 @@ func (s *Server) Trim(ctx context.Context, req *ledgerv1.TrimRequest) (*ledgerv1
 
 // ListStreamIDs returns distinct stream IDs that have at least one entry.
 func (s *Server) ListStreamIDs(ctx context.Context, req *ledgerv1.ListStreamIDsRequest) (*ledgerv1.ListStreamIDsResponse, error) {
-	ids, err := s.backend.ListStreamIDs(ctx, req.After, int(req.Limit))
+	ids, err := s.provider.ListStreamIDs(ctx, req.After, int(req.Limit))
 	if err != nil {
 		return nil, toGRPCStatus(err)
 	}
 	return &ledgerv1.ListStreamIDsResponse{StreamIds: ids}, nil
+}
+
+// Stat returns metrics for a stream, including entry count and first/last entry IDs.
+func (s *Server) Stat(ctx context.Context, req *ledgerv1.StatRequest) (*ledgerv1.StatResponse, error) {
+	if req.Stream == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "stream must not be empty")
+	}
+	stat, err := s.provider.Stat(ctx, req.Stream)
+	if err != nil {
+		return nil, toGRPCStatus(err)
+	}
+	return &ledgerv1.StatResponse{
+		Stream:  stat.Stream,
+		Count:   stat.Count,
+		FirstId: stat.FirstID,
+		LastId:  stat.LastID,
+	}, nil
+}
+
+// Search performs a full-text or substring search on entry payloads.
+// Returns Unimplemented if the backend does not support search.
+func (s *Server) Search(ctx context.Context, req *ledgerv1.SearchRequest) (*ledgerv1.SearchResponse, error) {
+	if req.Query == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "query must not be empty")
+	}
+	searcher, ok := s.provider.(ProviderSearcher)
+	if !ok {
+		return nil, status.Errorf(codes.Unimplemented, "backend does not support search")
+	}
+	opts := readOptionsFromProto(req.Options)
+	stored, err := searcher.Search(ctx, req.Stream, req.Query, opts)
+	if err != nil {
+		return nil, toGRPCStatus(err)
+	}
+	entries := make([]*ledgerv1.Entry, len(stored))
+	for i, e := range stored {
+		entries[i] = storedEntryToProto(e)
+	}
+	return &ledgerv1.SearchResponse{Entries: entries}, nil
 }
 
 // RenameStream changes the human-readable name of a stream without touching entries.
@@ -155,7 +194,7 @@ func (s *Server) RenameStream(ctx context.Context, req *ledgerv1.RenameStreamReq
 	if req.Name == "" || req.NewName == "" {
 		return nil, status.Errorf(codes.InvalidArgument, "name and new_name must not be empty")
 	}
-	renamer, ok := s.backend.(StreamRenamer)
+	renamer, ok := s.provider.(StreamRenamer)
 	if !ok {
 		return nil, status.Errorf(codes.Unimplemented, "backend does not support stream rename")
 	}
@@ -168,7 +207,7 @@ func (s *Server) RenameStream(ctx context.Context, req *ledgerv1.RenameStreamReq
 // Health reports backend connectivity. The gRPC call always succeeds; the
 // status string carries the health information ("ok" or an error description).
 func (s *Server) Health(ctx context.Context, req *ledgerv1.HealthRequest) (*ledgerv1.HealthResponse, error) {
-	if err := s.backend.Health(ctx); err != nil {
+	if err := s.provider.Health(ctx); err != nil {
 		return &ledgerv1.HealthResponse{Status: err.Error()}, nil
 	}
 	return &ledgerv1.HealthResponse{Status: "ok"}, nil

@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -62,16 +61,15 @@ func (c *Config) PIDFile() string {
 	return filepath.Join(c.configDir, "ledger.pid")
 }
 
-// Validate checks that the config values are well-formed.
-// It is called automatically by Load and LoadFrom.
+// Validate checks that the config values are well-formed. It enforces shape
+// only — backend-specific validation (driver availability, DSN correctness) is
+// performed by the server registry. Called automatically by LoadFrom.
 func (c *Config) Validate() error {
 	if _, _, err := net.SplitHostPort(c.Listen); err != nil {
 		return fmt.Errorf("ledger: config: invalid listen address %q: %w", c.Listen, err)
 	}
-	switch c.DB.Type {
-	case "sqlite", "postgres", "mongodb":
-	default:
-		return fmt.Errorf("ledger: config: unknown db type %q (want sqlite|postgres|mongodb)", c.DB.Type)
+	if c.DB.Type == "" {
+		return fmt.Errorf("ledger: config: db.type must be set (e.g. sqlite, postgres)")
 	}
 	if c.TLS.Cert != "" && c.TLS.Key == "" {
 		return fmt.Errorf("ledger: config: tls.cert requires tls.key")
@@ -98,50 +96,20 @@ func (c *Config) defaults() {
 	}
 }
 
-// searchPaths returns candidate directories in order of preference.
-func searchPaths() []string {
-	home, _ := os.UserHomeDir()
-	return []string{
-		filepath.Join(home, ".ledger"),
-		filepath.Join(home, ".config", "ledger"),
-	}
-}
-
-// defaultConfigDir returns the first search path (used when no config is found).
+// defaultConfigDir returns the default directory for daemon state files
+// (PID file, SQLite database, generated config.yaml).
 func defaultConfigDir() string {
-	paths := searchPaths()
-	if len(paths) > 0 {
-		return paths[0]
-	}
-	return "."
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".ledger")
 }
 
-// Load discovers and parses the config file. If no file is found, sensible
-// defaults are returned. The config file must be named "config.yaml".
-func Load() (*Config, error) {
-	for _, dir := range searchPaths() {
-		path := filepath.Join(dir, "config.yaml")
-		data, err := os.ReadFile(path)
-		if errors.Is(err, os.ErrNotExist) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("ledger: read config %s: %w", path, err)
-		}
-		cfg := &Config{configDir: dir}
-		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, fmt.Errorf("ledger: parse config %s: %w", path, err)
-		}
-		cfg.defaults()
-		if err := cfg.Validate(); err != nil {
-			return nil, err
-		}
-		return cfg, nil
-	}
-	// No config file found — use all defaults.
+// Defaults returns a Config with all fields set to sensible built-in values.
+// The configDir is set to the first search path (~/.ledger) so PID files and
+// database paths resolve to a stable location even without a config file.
+func Defaults() *Config {
 	cfg := &Config{configDir: defaultConfigDir()}
 	cfg.defaults()
-	return cfg, nil
+	return cfg
 }
 
 // LoadFrom parses a config file at an explicit path.

@@ -257,8 +257,11 @@ func (stubStore) Append(_ context.Context, _ string, _ ...RawEntry[json.RawMessa
 func (stubStore) Read(_ context.Context, _ string, _ ...ReadOption) ([]StoredEntry[int64, json.RawMessage], error) {
 	return nil, nil
 }
-func (stubStore) Count(_ context.Context, _ string) (int64, error)                         { return 0, nil }
-func (stubStore) SetTags(_ context.Context, _ string, _ int64, _ []string) error           { return nil }
+func (stubStore) Count(_ context.Context, _ string) (int64, error) { return 0, nil }
+func (stubStore) Stat(_ context.Context, _ string) (StreamStat[int64], error) {
+	return StreamStat[int64]{}, nil
+}
+func (stubStore) SetTags(_ context.Context, _ string, _ int64, _ []string) error { return nil }
 func (stubStore) SetAnnotations(_ context.Context, _ string, _ int64, _ map[string]*string) error {
 	return nil
 }

@@ -27,6 +27,8 @@ const (
 	LedgerService_Trim_FullMethodName           = "/ledger.v1.LedgerService/Trim"
 	LedgerService_ListStreamIDs_FullMethodName  = "/ledger.v1.LedgerService/ListStreamIDs"
 	LedgerService_RenameStream_FullMethodName   = "/ledger.v1.LedgerService/RenameStream"
+	LedgerService_Stat_FullMethodName           = "/ledger.v1.LedgerService/Stat"
+	LedgerService_Search_FullMethodName         = "/ledger.v1.LedgerService/Search"
 	LedgerService_Health_FullMethodName         = "/ledger.v1.LedgerService/Health"
 )
 
@@ -65,6 +67,11 @@ type LedgerServiceClient interface {
 	// RenameStream changes the human-readable name of a stream without touching
 	// its entries. Returns NOT_FOUND if the current name does not exist.
 	RenameStream(ctx context.Context, in *RenameStreamRequest, opts ...grpc.CallOption) (*RenameStreamResponse, error)
+	// Stat returns metrics for a stream, including entry count and first/last entry IDs.
+	Stat(ctx context.Context, in *StatRequest, opts ...grpc.CallOption) (*StatResponse, error)
+	// Search performs a substring / full-text search on entry payloads.
+	// Returns UNIMPLEMENTED if the backend does not support search.
+	Search(ctx context.Context, in *SearchRequest, opts ...grpc.CallOption) (*SearchResponse, error)
 	// Health reports backend connectivity. Returns status "ok" on success,
 	// or a description of the problem on failure.
 	Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error)
@@ -158,6 +165,26 @@ func (c *ledgerServiceClient) RenameStream(ctx context.Context, in *RenameStream
 	return out, nil
 }
 
+func (c *ledgerServiceClient) Stat(ctx context.Context, in *StatRequest, opts ...grpc.CallOption) (*StatResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(StatResponse)
+	err := c.cc.Invoke(ctx, LedgerService_Stat_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *ledgerServiceClient) Search(ctx context.Context, in *SearchRequest, opts ...grpc.CallOption) (*SearchResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(SearchResponse)
+	err := c.cc.Invoke(ctx, LedgerService_Search_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *ledgerServiceClient) Health(ctx context.Context, in *HealthRequest, opts ...grpc.CallOption) (*HealthResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(HealthResponse)
@@ -203,6 +230,11 @@ type LedgerServiceServer interface {
 	// RenameStream changes the human-readable name of a stream without touching
 	// its entries. Returns NOT_FOUND if the current name does not exist.
 	RenameStream(context.Context, *RenameStreamRequest) (*RenameStreamResponse, error)
+	// Stat returns metrics for a stream, including entry count and first/last entry IDs.
+	Stat(context.Context, *StatRequest) (*StatResponse, error)
+	// Search performs a substring / full-text search on entry payloads.
+	// Returns UNIMPLEMENTED if the backend does not support search.
+	Search(context.Context, *SearchRequest) (*SearchResponse, error)
 	// Health reports backend connectivity. Returns status "ok" on success,
 	// or a description of the problem on failure.
 	Health(context.Context, *HealthRequest) (*HealthResponse, error)
@@ -239,6 +271,12 @@ func (UnimplementedLedgerServiceServer) ListStreamIDs(context.Context, *ListStre
 }
 func (UnimplementedLedgerServiceServer) RenameStream(context.Context, *RenameStreamRequest) (*RenameStreamResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method RenameStream not implemented")
+}
+func (UnimplementedLedgerServiceServer) Stat(context.Context, *StatRequest) (*StatResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Stat not implemented")
+}
+func (UnimplementedLedgerServiceServer) Search(context.Context, *SearchRequest) (*SearchResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Search not implemented")
 }
 func (UnimplementedLedgerServiceServer) Health(context.Context, *HealthRequest) (*HealthResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Health not implemented")
@@ -408,6 +446,42 @@ func _LedgerService_RenameStream_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _LedgerService_Stat_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(StatRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LedgerServiceServer).Stat(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LedgerService_Stat_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LedgerServiceServer).Stat(ctx, req.(*StatRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
+func _LedgerService_Search_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(SearchRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(LedgerServiceServer).Search(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: LedgerService_Search_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(LedgerServiceServer).Search(ctx, req.(*SearchRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _LedgerService_Health_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(HealthRequest)
 	if err := dec(in); err != nil {
@@ -464,6 +538,14 @@ var LedgerService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "RenameStream",
 			Handler:    _LedgerService_RenameStream_Handler,
+		},
+		{
+			MethodName: "Stat",
+			Handler:    _LedgerService_Stat_Handler,
+		},
+		{
+			MethodName: "Search",
+			Handler:    _LedgerService_Search_Handler,
 		},
 		{
 			MethodName: "Health",

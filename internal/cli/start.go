@@ -20,6 +20,7 @@ import (
 
 func newStartCmd() *cobra.Command {
 	var foreground bool
+	var readyFD int
 
 	cmd := &cobra.Command{
 		Use:   "start",
@@ -37,17 +38,21 @@ stderr (or log_file if configured). Useful for containers or systemd.`,
 				return err
 			}
 			if foreground {
-				return runDaemon(cmd.Context(), cfg)
+				return runDaemon(cmd.Context(), cfg, readyFD)
 			}
 			return startBackground(cmd, cfg)
 		},
 	}
 	cmd.Flags().BoolVar(&foreground, "foreground", false, "run in the foreground (logs to stderr or log_file)")
+	cmd.Flags().IntVar(&readyFD, "ready-fd", 0, "")
+	_ = cmd.Flags().MarkHidden("ready-fd")
 	return cmd
 }
 
 // runDaemon is the actual daemon loop — called when --foreground is set.
-func runDaemon(ctx context.Context, cfg *config.Config) error {
+// readyFD, when non-zero, is a writable file descriptor; a single byte is
+// written to it once the server is listening so the parent knows it is ready.
+func runDaemon(ctx context.Context, cfg *config.Config, readyFD int) error {
 	firstRun := false
 	if _, err := os.Stat(filepath.Join(cfg.ConfigDir(), "config.yaml")); errors.Is(err, os.ErrNotExist) {
 		firstRun = true
@@ -102,6 +107,13 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 		return err
 	}
 
+	// Signal readiness to the parent process before blocking on Serve.
+	if readyFD > 0 {
+		pipe := os.NewFile(uintptr(readyFD), "ready")
+		_, _ = pipe.Write([]byte{1})
+		_ = pipe.Close()
+	}
+
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
 
@@ -119,7 +131,8 @@ func runDaemon(ctx context.Context, cfg *config.Config) error {
 }
 
 // startBackground re-executes the binary with 'start --foreground' as a
-// detached background process.
+// detached background process. A pipe signals readiness so we do not
+// rely on polling the PID file.
 func startBackground(cmd *cobra.Command, cfg *config.Config) error {
 	pidFile := cfg.PIDFile()
 	pid, err := daemon.ReadPID(pidFile)
@@ -136,7 +149,13 @@ func startBackground(cmd *cobra.Command, cfg *config.Config) error {
 		return fmt.Errorf("cannot find executable: %w", err)
 	}
 
-	args := []string{"start", "--foreground"}
+	// Create a pipe: parent reads, child writes one byte when ready.
+	pr, pw, err := os.Pipe()
+	if err != nil {
+		return fmt.Errorf("create ready pipe: %w", err)
+	}
+
+	args := []string{"start", "--foreground", "--ready-fd", "3"}
 	if flagConfig != "" {
 		args = append(args, "--config", flagConfig)
 	}
@@ -151,21 +170,50 @@ func startBackground(cmd *cobra.Command, cfg *config.Config) error {
 	proc.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	proc.Stdout = nil
 	proc.Stderr = nil
+	proc.ExtraFiles = []*os.File{pw} // becomes FD 3 in child
 	if err := proc.Start(); err != nil {
+		_ = pr.Close()
+		_ = pw.Close()
 		return fmt.Errorf("start daemon: %w", err)
 	}
+	// Close the parent's write end: if the child exits without writing,
+	// Read below returns EOF which we treat as a startup failure.
+	_ = pw.Close()
+	_ = proc.Process.Release()
 
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		newPID, err := daemon.ReadPID(pidFile)
-		if err == nil && newPID > 0 && daemon.IsAlive(newPID) {
-			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "ledger daemon started (pid %d)\n", newPID)
-			return nil
+	const readyTimeout = 5 * time.Second
+	type result struct{ err error }
+	ch := make(chan result, 1)
+	go func() {
+		buf := make([]byte, 1)
+		_, err := pr.Read(buf)
+		_ = pr.Close()
+		if err != nil {
+			ch <- result{fmt.Errorf("daemon failed to start (check %s)", logFileHint(cfg))}
+		} else {
+			ch <- result{}
 		}
-		time.Sleep(100 * time.Millisecond)
+	}()
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			return res.err
+		}
+		newPID, _ := daemon.ReadPID(pidFile)
+		_, _ = fmt.Fprintf(cmd.OutOrStdout(), "ledger daemon started (pid %d)\n", newPID)
+		return nil
+	case <-time.After(readyTimeout):
+		_ = pr.Close()
+		return fmt.Errorf("daemon did not report ready within %s (check %s)", readyTimeout, logFileHint(cfg))
 	}
-	_, _ = fmt.Fprintln(cmd.OutOrStdout(), "ledger daemon started (pid file not yet written)")
-	return nil
+}
+
+func logFileHint(cfg *config.Config) string {
+	if cfg.LogFile != "" {
+		return cfg.LogFile
+	}
+	return "stderr (no log_file configured)"
 }
 
 // writeDefaultConfig writes an annotated config.yaml so the user can see and
@@ -193,7 +241,8 @@ listen: %q
 
 # Database backend.
 db:
-  # Backend type: sqlite | postgres | mongodb
+  # Backend type: sqlite | postgres
+  # MongoDB and ClickHouse are library-only; the daemon does not support them.
   type: sqlite
   sqlite:
     path: %q
@@ -201,11 +250,6 @@ db:
   # PostgreSQL — used when type: postgres
   # postgres:
   #   dsn: "postgres://user:pass@localhost:5432/ledger?sslmode=disable"
-
-  # MongoDB — connect via the direct library, not the daemon
-  # mongodb:
-  #   uri:      "mongodb://localhost:27017"
-  #   database: "ledger"
 `, cfg.Listen, cfg.DB.SQLite.Path)
 	return os.WriteFile(path, []byte(content), 0o600)
 }

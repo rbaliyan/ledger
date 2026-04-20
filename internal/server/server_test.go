@@ -8,6 +8,7 @@ import (
 	ledgerv1 "github.com/rbaliyan/ledger/api/ledger/v1"
 	"github.com/rbaliyan/ledger/internal/config"
 	"github.com/rbaliyan/ledger/internal/server"
+	"github.com/rbaliyan/ledger/ledgerpb"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
@@ -45,9 +46,9 @@ func newTestServer(t *testing.T) ledgerv1.LedgerServiceClient {
 	return ledgerv1.NewLedgerServiceClient(conn)
 }
 
-// storeCtx returns a context with the x-ledger-store header set.
+// storeCtx returns a context with the store metadata header set.
 func storeCtx(ctx context.Context, store string) context.Context {
-	return metadata.NewOutgoingContext(ctx, metadata.Pairs("x-ledger-store", store))
+	return metadata.NewOutgoingContext(ctx, metadata.Pairs(ledgerpb.StoreMetadataHeader, store))
 }
 
 func TestServerAppendRead(t *testing.T) {
@@ -196,20 +197,14 @@ func TestServerRenameStream(t *testing.T) {
 		t.Errorf("expected 0 entries for old-name after rename, got %d", len(readOld.Entries))
 	}
 
-	// ListStreamIDs reflects the new name.
+	// ListStreamIDs reflects the new name only. Read-only operations on the
+	// non-existent old-name must not create a phantom mapping.
 	listResp, err := client.ListStreamIDs(ctx, &ledgerv1.ListStreamIDsRequest{})
 	if err != nil {
 		t.Fatalf("ListStreamIDs: %v", err)
 	}
-	// After rename, old-name was accessed (creating a new mapping), and new-name is there too.
-	found := false
-	for _, id := range listResp.StreamIds {
-		if id == "new-name" {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("new-name not found in ListStreamIDs: %v", listResp.StreamIds)
+	if len(listResp.StreamIds) != 1 || listResp.StreamIds[0] != "new-name" {
+		t.Errorf("ListStreamIDs = %v, want [new-name]", listResp.StreamIds)
 	}
 }
 
@@ -246,8 +241,8 @@ func TestServerAPIKeyRequired(t *testing.T) {
 
 	// With correct API key — should succeed.
 	ctx = metadata.NewOutgoingContext(t.Context(), metadata.Pairs(
-		"x-ledger-store", "test",
-		"x-api-key", "secret",
+		ledgerpb.StoreMetadataHeader, "test",
+		ledgerpb.APIKeyMetadataHeader, "secret",
 	))
 	_, err = client.Count(ctx, &ledgerv1.CountRequest{Stream: "s"})
 	if err != nil {

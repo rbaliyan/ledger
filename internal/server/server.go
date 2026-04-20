@@ -6,6 +6,7 @@ import (
 	"crypto/x509"
 	"database/sql"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -13,34 +14,25 @@ import (
 	ledgerv1 "github.com/rbaliyan/ledger/api/ledger/v1"
 	"github.com/rbaliyan/ledger/internal/config"
 	"github.com/rbaliyan/ledger/ledgerpb"
-	"github.com/rbaliyan/ledger/postgres"
-	"github.com/rbaliyan/ledger/sqlite"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
-
-	_ "github.com/lib/pq"
-	_ "modernc.org/sqlite"
 )
 
 // Server wraps a gRPC server and its listener.
 type Server struct {
 	grpc     *grpc.Server
 	listener net.Listener
-	mux      *muxBackend
-	db       *sql.DB
+	mux      *muxProvider
+	closer   io.Closer
 }
 
 // New creates and configures the gRPC server from cfg.
 func New(ctx context.Context, cfg *config.Config) (*Server, error) {
-	db, factory, err := backendFactory(ctx, cfg)
+	res, err := openDriver(ctx, cfg)
 	if err != nil {
 		return nil, err
 	}
-	meta, err := newStreamMetaStore(ctx, db, cfg.DB.Type)
-	if err != nil {
-		return nil, fmt.Errorf("server: stream metadata: %w", err)
-	}
-	mux := newMuxBackend(factory, meta)
+	mux := newMuxProvider(res.Factory, res.Meta)
 	guard := &apiKeyGuard{apiKey: cfg.APIKey}
 
 	opts := []grpc.ServerOption{
@@ -65,7 +57,7 @@ func New(ctx context.Context, cfg *config.Config) (*Server, error) {
 	}
 	slog.Info("ledger daemon listening", "addr", ln.Addr().String())
 
-	return &Server{grpc: grpcSrv, listener: ln, mux: mux, db: db}, nil
+	return &Server{grpc: grpcSrv, listener: ln, mux: mux, closer: res.Closer}, nil
 }
 
 // Addr returns the address the server is listening on.
@@ -76,52 +68,14 @@ func (s *Server) Serve() error {
 	return s.grpc.Serve(s.listener)
 }
 
-// Stop gracefully drains in-flight RPCs, then closes the DB connection.
+// Stop gracefully drains in-flight RPCs, then closes the backend resources.
 func (s *Server) Stop(ctx context.Context) {
 	s.grpc.GracefulStop()
 	s.mux.Close(ctx)
-	if s.db != nil {
-		if err := s.db.Close(); err != nil {
-			slog.Warn("error closing database", "err", err)
+	if s.closer != nil {
+		if err := s.closer.Close(); err != nil {
+			slog.Warn("error closing backend", "err", err)
 		}
-	}
-}
-
-// backendFactory returns a BackendFactory for the configured DB type plus
-// the underlying *sql.DB so it can be closed with Stop.
-func backendFactory(ctx context.Context, cfg *config.Config) (*sql.DB, BackendFactory, error) {
-	switch cfg.DB.Type {
-	case "sqlite":
-		db, err := openDB(ctx, "sqlite", cfg.DB.SQLite.Path)
-		if err != nil {
-			return nil, nil, err
-		}
-		return db, func(ctx context.Context, name string) (ledgerpb.Backend, error) {
-			store, err := sqlite.New(ctx, db, sqlite.WithTable(name))
-			if err != nil {
-				return nil, err
-			}
-			return ledgerpb.NewInt64Backend(store), nil
-		}, nil
-
-	case "postgres":
-		db, err := openDB(ctx, "postgres", cfg.DB.Postgres.DSN)
-		if err != nil {
-			return nil, nil, err
-		}
-		return db, func(ctx context.Context, name string) (ledgerpb.Backend, error) {
-			store, err := postgres.New(ctx, db, postgres.WithTable(name))
-			if err != nil {
-				return nil, err
-			}
-			return ledgerpb.NewInt64Backend(store), nil
-		}, nil
-
-	case "mongodb":
-		return nil, nil, fmt.Errorf("server: mongodb backend not supported in daemon (use direct library)")
-
-	default:
-		return nil, nil, fmt.Errorf("server: unknown db type %q", cfg.DB.Type)
 	}
 }
 
@@ -144,12 +98,17 @@ func openDB(ctx context.Context, driver, dsn string) (*sql.DB, error) {
 }
 
 // buildTLS constructs gRPC transport credentials from cert/key/CA paths.
+// A non-empty CA enables mutual TLS: clients must present a certificate signed
+// by that CA.
 func buildTLS(tlsCfg config.TLSConfig) (credentials.TransportCredentials, error) {
 	cert, err := tls.LoadX509KeyPair(tlsCfg.Cert, tlsCfg.Key)
 	if err != nil {
 		return nil, fmt.Errorf("load cert/key: %w", err)
 	}
-	tc := &tls.Config{Certificates: []tls.Certificate{cert}}
+	tc := &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		MinVersion:   tls.VersionTLS12,
+	}
 	if tlsCfg.CA != "" {
 		ca, err := os.ReadFile(tlsCfg.CA)
 		if err != nil {

@@ -33,10 +33,11 @@ type sqlExecutor interface {
 }
 
 var (
-	_ ledger.Store[int64, json.RawMessage] = (*Store)(nil)
-	_ ledger.HealthChecker                 = (*Store)(nil)
-	_ ledger.CursorStore                   = (*Store)(nil)
-	_ ledger.SourceIDLookup[int64]         = (*Store)(nil)
+	_ ledger.Store[int64, json.RawMessage]    = (*Store)(nil)
+	_ ledger.HealthChecker                    = (*Store)(nil)
+	_ ledger.CursorStore                      = (*Store)(nil)
+	_ ledger.SourceIDLookup[int64]            = (*Store)(nil)
+	_ ledger.Searcher[int64, json.RawMessage] = (*Store)(nil)
 )
 
 // Store is a PostgreSQL ledger store.
@@ -422,6 +423,116 @@ func (s *Store) Count(ctx context.Context, stream string) (int64, error) {
 		return 0, fmt.Errorf("ledger/postgres: count: %w", err)
 	}
 	return count, nil
+}
+
+// Stat returns metrics for the named stream.
+func (s *Store) Stat(ctx context.Context, stream string) (ledger.StreamStat[int64], error) {
+	if s.closed.Load() {
+		return ledger.StreamStat[int64]{}, ledger.ErrStoreClosed
+	}
+	exec := s.executor(ctx)
+	query := fmt.Sprintf(`SELECT COUNT(*), MIN(id), MAX(id) FROM %s WHERE stream = $1`, s.table)
+	var (
+		count int64
+		minID sql.NullInt64
+		maxID sql.NullInt64
+	)
+	if err := exec.QueryRowContext(ctx, query, stream).Scan(&count, &minID, &maxID); err != nil {
+		return ledger.StreamStat[int64]{}, fmt.Errorf("ledger/postgres: stat: %w", err)
+	}
+	return ledger.StreamStat[int64]{
+		Stream:  stream,
+		Count:   count,
+		FirstID: minID.Int64,
+		LastID:  maxID.Int64,
+	}, nil
+}
+
+// Search performs a full-text search on entry payloads using ILIKE.
+func (s *Store) Search(ctx context.Context, stream string, query string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[int64, json.RawMessage], error) {
+	if s.closed.Load() {
+		return nil, ledger.ErrStoreClosed
+	}
+
+	exec := s.executor(ctx)
+	o := ledger.ApplyReadOptions(opts...)
+
+	var (
+		clauses []string
+		args    []any
+		argN    int
+	)
+
+	if stream != "" {
+		argN++
+		clauses = append(clauses, fmt.Sprintf("stream = $%d", argN))
+		args = append(args, stream)
+	}
+
+	argN++
+	// Note: using encode/decode is not very efficient for searching.
+	// For production use, a dedicated FTS index should be used.
+	clauses = append(clauses, fmt.Sprintf("payload::text ILIKE $%d", argN))
+	args = append(args, "%"+query+"%")
+
+	if o.HasAfter() {
+		after, _ := ledger.AfterValue[int64](o)
+		argN++
+		if o.Order() == ledger.Descending {
+			clauses = append(clauses, fmt.Sprintf("id < $%d", argN))
+		} else {
+			clauses = append(clauses, fmt.Sprintf("id > $%d", argN))
+		}
+		args = append(args, after)
+	}
+
+	dir := "ASC"
+	if o.Order() == ledger.Descending {
+		dir = "DESC"
+	}
+
+	argN++
+	sqlQuery := fmt.Sprintf(
+		`SELECT id, stream, payload, order_key, dedup_key, schema_version, metadata, tags, annotations, created_at, updated_at FROM %s WHERE %s ORDER BY id %s LIMIT $%d`,
+		s.table, strings.Join(clauses, " AND "), dir, argN,
+	)
+	args = append(args, o.Limit())
+
+	rows, err := exec.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, fmt.Errorf("ledger/postgres: search: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []ledger.StoredEntry[int64, json.RawMessage]
+	for rows.Next() {
+		var (
+			e            ledger.StoredEntry[int64, json.RawMessage]
+			payloadBytes []byte
+			meta         []byte
+			tagsJSON     []byte
+			annotations  []byte
+			updatedAt    sql.NullTime
+		)
+		if err := rows.Scan(&e.ID, &e.Stream, &payloadBytes, &e.OrderKey, &e.DedupKey, &e.SchemaVersion, &meta, &tagsJSON, &annotations, &e.CreatedAt, &updatedAt); err != nil {
+			return nil, fmt.Errorf("ledger/postgres: scan: %w", err)
+		}
+		e.Payload = json.RawMessage(payloadBytes)
+		if len(meta) > 0 {
+			e.Metadata, _ = decodeJSONB(meta)
+		}
+		if len(tagsJSON) > 0 {
+			json.Unmarshal(tagsJSON, &e.Tags) //nolint:errcheck
+		}
+		if len(annotations) > 0 {
+			e.Annotations, _ = decodeJSONB(annotations)
+		}
+		if updatedAt.Valid {
+			e.UpdatedAt = &updatedAt.Time
+		}
+		entries = append(entries, e)
+	}
+	return entries, nil
 }
 
 // SetTags replaces all tags on an entry.

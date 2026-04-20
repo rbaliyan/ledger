@@ -372,6 +372,110 @@ func (s *Store) Count(ctx context.Context, stream string) (int64, error) {
 	return n, nil
 }
 
+// Stat returns metrics for the named stream.
+func (s *Store) Stat(ctx context.Context, stream string) (ledger.StreamStat[string], error) {
+	if s.closed.Load() {
+		return ledger.StreamStat[string]{}, ledger.ErrStoreClosed
+	}
+	ctx = s.sessionCtx(ctx)
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{{Key: "stream", Value: stream}}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: nil},
+			{Key: "count", Value: bson.D{{Key: "$sum", Value: 1}}},
+			{Key: "min", Value: bson.D{{Key: "$min", Value: "$_id"}}},
+			{Key: "max", Value: bson.D{{Key: "$max", Value: "$_id"}}},
+		}}},
+	}
+	cursor, err := s.coll.Aggregate(ctx, pipeline)
+	if err != nil {
+		return ledger.StreamStat[string]{}, fmt.Errorf("ledger/mongodb: stat: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	if !cursor.Next(ctx) {
+		return ledger.StreamStat[string]{Stream: stream}, nil
+	}
+
+	var res struct {
+		Count int64         `bson:"count"`
+		Min   bson.ObjectID `bson:"min"`
+		Max   bson.ObjectID `bson:"max"`
+	}
+	if err := cursor.Decode(&res); err != nil {
+		return ledger.StreamStat[string]{}, fmt.Errorf("ledger/mongodb: decode stat: %w", err)
+	}
+	return ledger.StreamStat[string]{
+		Stream:  stream,
+		Count:   res.Count,
+		FirstID: res.Min.Hex(),
+		LastID:  res.Max.Hex(),
+	}, nil
+}
+
+// Search performs a full-text search on entry payloads using $text.
+// Requires a text index on the payload field.
+func (s *Store) Search(ctx context.Context, stream string, query string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[string, bson.Raw], error) {
+	if s.closed.Load() {
+		return nil, ledger.ErrStoreClosed
+	}
+
+	ctx = s.sessionCtx(ctx)
+	o := ledger.ApplyReadOptions(opts...)
+
+	filter := bson.D{{Key: "$text", Value: bson.D{{Key: "$search", Value: query}}}}
+	if stream != "" {
+		filter = append(filter, bson.E{Key: "stream", Value: stream})
+	}
+
+	if o.HasAfter() {
+		after, _ := ledger.AfterValue[string](o)
+		oid, _ := bson.ObjectIDFromHex(after)
+		if o.Order() == ledger.Descending {
+			filter = append(filter, bson.E{Key: "_id", Value: bson.D{{Key: "$lt", Value: oid}}})
+		} else {
+			filter = append(filter, bson.E{Key: "_id", Value: bson.D{{Key: "$gt", Value: oid}}})
+		}
+	}
+
+	sortDir := 1
+	if o.Order() == ledger.Descending {
+		sortDir = -1
+	}
+
+	findOpts := mongoopts.Find().
+		SetSort(bson.D{{Key: "_id", Value: sortDir}}).
+		SetLimit(int64(o.Limit()))
+
+	cursor, err := s.coll.Find(ctx, filter, findOpts)
+	if err != nil {
+		return nil, fmt.Errorf("ledger/mongodb: search: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	var entries []ledger.StoredEntry[string, bson.Raw]
+	for cursor.Next(ctx) {
+		var doc entry
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("ledger/mongodb: decode: %w", err)
+		}
+		entries = append(entries, ledger.StoredEntry[string, bson.Raw]{
+			ID:            doc.ID.Hex(),
+			Stream:        doc.Stream,
+			Payload:       doc.Payload,
+			OrderKey:      doc.OrderKey,
+			DedupKey:      doc.DedupKey,
+			SchemaVersion: doc.SchemaVersion,
+			Metadata:      doc.Metadata,
+			Tags:          doc.Tags,
+			Annotations:   doc.Annotations,
+			CreatedAt:     doc.CreatedAt,
+			UpdatedAt:     doc.UpdatedAt,
+		})
+	}
+	return entries, nil
+}
+
 // SetTags replaces all tags on an entry.
 func (s *Store) SetTags(ctx context.Context, stream string, id string, tags []string) error {
 	if s.closed.Load() {

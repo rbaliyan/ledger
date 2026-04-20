@@ -40,12 +40,14 @@ func newStreamCmd() *cobra.Command {
 		newStreamListCmd(),
 		newStreamAppendCmd(),
 		newStreamReadCmd(),
+		newStreamSearchCmd(),
 		newStreamCountCmd(),
 		newStreamTagCmd(),
 		newStreamAnnotateCmd(),
 		newStreamTrimCmd(),
 		newStreamTailCmd(),
 		newStreamRenameCmd(),
+		newStreamStatCmd(),
 	)
 	return cmd
 }
@@ -225,6 +227,61 @@ prefixed with its ID). Pass --json to print the full entry as JSON instead.`,
 	return cmd
 }
 
+// ── search ───────────────────────────────────────────────────────────────────
+
+func newStreamSearchCmd() *cobra.Command {
+	var store, stream string
+	var limit int64
+	var desc, jsonMode bool
+
+	cmd := &cobra.Command{
+		Use:   "search <query>",
+		Short: "Search for entries matching a query",
+		Long: `Search for entries whose payload contains the query string.
+
+Query syntax depends on the backend: SQLite and PostgreSQL use substring
+matching (LIKE), MongoDB uses $text (requires a text index on the payload).
+If --stream is omitted, all streams in the store are searched.
+
+Examples:
+  ledger stream search "failed"
+  ledger stream search --stream orders "amount"
+  ledger stream search --store events --json "error"`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg, err := clientConfig()
+			if err != nil {
+				return err
+			}
+			client, conn, err := newClient(cfg)
+			if err != nil {
+				return err
+			}
+			defer conn.Close() //nolint:errcheck
+
+			ctx := storeCtx(cmd.Context(), cfg, store)
+			resp, err := client.Search(ctx, &ledgerv1.SearchRequest{
+				Stream: stream,
+				Query:  args[0],
+				Options: &ledgerv1.ReadOptions{
+					Limit: limit,
+					Desc:  desc,
+				},
+			})
+			if err != nil {
+				return err
+			}
+			return printEntries(cmd.OutOrStdout(), resp.Entries, jsonMode)
+		},
+	}
+	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream to search (empty = all streams)")
+	cmd.Flags().BoolVar(&jsonMode, "json", false, "print full JSON entry instead of plain text payload")
+	cmd.Flags().Int64Var(&limit, "limit", 0, "max results (0 = server default)")
+	cmd.Flags().BoolVar(&desc, "desc", false, "newest first")
+	return cmd
+}
+
 // ── count ─────────────────────────────────────────────────────────────────────
 
 func newStreamCountCmd() *cobra.Command {
@@ -311,7 +368,7 @@ func newStreamAnnotateCmd() *cobra.Command {
 				return usageErrorf(cmd, "--id is required")
 			}
 			if len(pairs) == 0 {
-				return fmt.Errorf("at least one --set key=value or --del key is required")
+				return fmt.Errorf("at least one --set key=value is required (use --set key= to delete an annotation)")
 			}
 			cfg, err := clientConfig()
 			if err != nil {
@@ -481,6 +538,11 @@ func tailStream(
 	interval time.Duration,
 	jsonMode bool,
 ) error {
+	// Guard against a zero or negative interval which would starve select
+	// on the ticker channel.
+	if interval <= 0 {
+		interval = 2 * time.Second
+	}
 	var cursor string
 	backoff := interval
 	ticker := time.NewTicker(interval)
@@ -564,6 +626,45 @@ func decodePayload(raw []byte) string {
 		return s
 	}
 	return string(raw)
+}
+
+// ── stat ─────────────────────────────────────────────────────────────────────
+
+func newStreamStatCmd() *cobra.Command {
+	var store, stream string
+
+	cmd := &cobra.Command{
+		Use:   "stat",
+		Short: "Get stream metrics (count, range)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := clientConfig()
+			if err != nil {
+				return err
+			}
+			client, conn, err := newClient(cfg)
+			if err != nil {
+				return err
+			}
+			defer conn.Close() //nolint:errcheck
+
+			ctx := storeCtx(cmd.Context(), cfg, store)
+			resp, err := client.Stat(ctx, &ledgerv1.StatRequest{Stream: stream})
+			if err != nil {
+				return err
+			}
+
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Stream:  %s\n", resp.Stream)
+			_, _ = fmt.Fprintf(cmd.OutOrStdout(), "Count:   %d\n", resp.Count)
+			if resp.Count > 0 {
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "FirstID: %s\n", resp.FirstId)
+				_, _ = fmt.Fprintf(cmd.OutOrStdout(), "LastID:  %s\n", resp.LastId)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
+	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
+	return cmd
 }
 
 // parseKV converts "key=value" strings to a map.

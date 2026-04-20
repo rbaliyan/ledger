@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -17,7 +18,18 @@ type streamMetaStore struct {
 	driver string // "sqlite" or "postgres"
 }
 
+// supportedMetaDrivers enumerates database drivers the metadata store knows
+// how to dialect-specialise. Backends outside this set cannot be used with the
+// daemon mux today.
+var supportedMetaDrivers = map[string]bool{
+	"sqlite":   true,
+	"postgres": true,
+}
+
 func newStreamMetaStore(ctx context.Context, db *sql.DB, driver string) (*streamMetaStore, error) {
+	if !supportedMetaDrivers[driver] {
+		return nil, fmt.Errorf("server: stream metadata driver %q not supported", driver)
+	}
 	m := &streamMetaStore{db: db, driver: driver}
 	return m, m.init(ctx)
 }
@@ -36,11 +48,38 @@ func (m *streamMetaStore) init(ctx context.Context) error {
 	return err
 }
 
-// resolveOrCreate returns the internal UUID for the given human-readable name,
-// creating a new mapping when one does not exist.
-func (m *streamMetaStore) resolveOrCreate(ctx context.Context, storeName, name string) (string, error) {
-	newID := uuid.New().String()
+// resolve returns the internal UUID for name. Returns ("", false, nil) when
+// the stream does not exist in the metadata table. Used for read-only
+// operations that must not create phantom streams.
+func (m *streamMetaStore) resolve(ctx context.Context, storeName, name string) (string, bool, error) {
+	var q string
+	if m.driver == "postgres" {
+		q = `SELECT stream_id FROM ledger_stream_metadata WHERE store_name=$1 AND name=$2`
+	} else {
+		q = `SELECT stream_id FROM ledger_stream_metadata WHERE store_name=? AND name=?`
+	}
+	var id string
+	err := m.db.QueryRowContext(ctx, q, storeName, name).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, fmt.Errorf("meta: resolve stream %q: %w", name, err)
+	}
+	return id, true, nil
+}
 
+// resolveOrCreate returns the internal UUID for the given human-readable name,
+// creating a new mapping when one does not exist. Used only by Append.
+func (m *streamMetaStore) resolveOrCreate(ctx context.Context, storeName, name string) (string, error) {
+	// Fast path: existing mapping.
+	if id, ok, err := m.resolve(ctx, storeName, name); err != nil {
+		return "", err
+	} else if ok {
+		return id, nil
+	}
+
+	newID := uuid.New().String()
 	var insertSQL string
 	if m.driver == "postgres" {
 		insertSQL = `INSERT INTO ledger_stream_metadata (store_name, name, stream_id)
@@ -53,24 +92,28 @@ func (m *streamMetaStore) resolveOrCreate(ctx context.Context, storeName, name s
 		return "", fmt.Errorf("meta: insert stream %q: %w", name, err)
 	}
 
-	var actualID string
-	var selectSQL string
-	if m.driver == "postgres" {
-		selectSQL = `SELECT stream_id FROM ledger_stream_metadata WHERE store_name=$1 AND name=$2`
-	} else {
-		selectSQL = `SELECT stream_id FROM ledger_stream_metadata WHERE store_name=? AND name=?`
+	// Re-select to pick up any concurrently-inserted ID.
+	id, ok, err := m.resolve(ctx, storeName, name)
+	if err != nil {
+		return "", err
 	}
-	if err := m.db.QueryRowContext(ctx, selectSQL, storeName, name).Scan(&actualID); err != nil {
-		return "", fmt.Errorf("meta: resolve stream %q: %w", name, err)
+	if !ok {
+		return "", fmt.Errorf("meta: stream %q not found after insert", name)
 	}
-	return actualID, nil
+	return id, nil
 }
 
 // rename changes the human-readable name of an existing stream within a store.
-// Returns [ledger.ErrStreamNotFound] when oldName does not exist.
+// Returns [ledger.ErrStreamNotFound] when oldName does not exist, and
+// [ledger.ErrStreamExists] when newName is already in use.
 func (m *streamMetaStore) rename(ctx context.Context, storeName, oldName, newName string) error {
 	if oldName == newName {
 		return nil
+	}
+	if _, ok, err := m.resolve(ctx, storeName, newName); err != nil {
+		return fmt.Errorf("meta: rename check target %q: %w", newName, err)
+	} else if ok {
+		return fmt.Errorf("%w: %q in store %q", ledger.ErrStreamExists, newName, storeName)
 	}
 	var q string
 	if m.driver == "postgres" {
