@@ -312,7 +312,7 @@ func (s *Store) Stat(ctx context.Context, stream string) (ledger.StreamStat[stri
 		firstID  string
 		lastID   string
 	)
-	query := fmt.Sprintf(`SELECT count(), min(id), max(id) FROM %s WHERE stream = ?`, s.table)
+	query := fmt.Sprintf(`SELECT count(), min(id), max(id) FROM %s WHERE stream = ?`, s.table) // #nosec G201
 	err := s.db.QueryRowContext(ctx, query, stream).Scan(&count, &firstID, &lastID)
 	if err != nil {
 		return ledger.StreamStat[string]{}, fmt.Errorf("ledger/clickhouse: stat: %w", err)

@@ -114,7 +114,7 @@ func Defaults() *Config {
 
 // LoadFrom parses a config file at an explicit path.
 func LoadFrom(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is an explicit user-supplied config file
 	if err != nil {
 		return nil, fmt.Errorf("ledger: read config %s: %w", path, err)
 	}

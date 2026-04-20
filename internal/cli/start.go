@@ -166,7 +166,7 @@ func startBackground(cmd *cobra.Command, cfg *config.Config) error {
 		args = append(args, "--addr", flagAddr)
 	}
 
-	proc := exec.Command(self, args...)
+	proc := exec.Command(self, args...) // #nosec G204 -- self is os.Executable(), not user input
 	proc.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	proc.Stdout = nil
 	proc.Stderr = nil

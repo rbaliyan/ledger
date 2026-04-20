@@ -13,7 +13,7 @@ import (
 // Returns an error (wrapping os.ErrExist) if the file already exists so
 // callers can detect a concurrent daemon start without a TOCTOU race.
 func AcquirePID(path string) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600) // #nosec G304 -- path is the daemon's own PID file
 	if err != nil {
 		return fmt.Errorf("ledger: acquire pid file %s: %w", path, err)
 	}
@@ -27,7 +27,7 @@ func AcquirePID(path string) error {
 // ReadPID reads and parses the PID from path. Returns 0, nil when the file
 // does not exist (daemon not running).
 func ReadPID(path string) (int, error) {
-	data, err := os.ReadFile(path)
+	data, err := os.ReadFile(path) // #nosec G304 -- path is the daemon's own PID file
 	if errors.Is(err, os.ErrNotExist) {
 		return 0, nil
 	}

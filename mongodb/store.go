@@ -557,8 +557,10 @@ func (s *Store) searchAtlas(ctx context.Context, stream, query string, opts ...l
 	return s.decodeCursor(ctx, cursor, "atlas search")
 }
 
-// EnsureSearchIndex creates the text index on the payload field required by the
-// default $text-based Search. The operation is idempotent.
+// EnsureSearchIndex creates a wildcard text index ($**) on the collection,
+// enabling $text-based Search across all string fields in every document
+// (including nested fields within the payload subdocument). The operation is
+// idempotent.
 //
 // Returns an error when [WithAtlasSearch] is configured — Atlas Search indexes
 // must be created in the Atlas UI; this library does not manage them.
@@ -569,8 +571,10 @@ func (s *Store) EnsureSearchIndex(ctx context.Context) error {
 	if s.atlasIndex != "" {
 		return fmt.Errorf("ledger/mongodb: EnsureSearchIndex is not applicable for Atlas Search; create the index in the Atlas UI: %w", ledger.ErrNotSupported)
 	}
+	// Wildcard text index covers all string fields recursively, including those
+	// nested inside the payload subdocument regardless of schema.
 	model := mongo.IndexModel{
-		Keys: bson.D{{Key: "payload", Value: "text"}},
+		Keys: bson.D{{Key: "$**", Value: "text"}},
 	}
 	if _, err := s.coll.Indexes().CreateOne(ctx, model); err != nil {
 		return fmt.Errorf("ledger/mongodb: create text index: %w", err)
