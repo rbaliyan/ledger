@@ -185,8 +185,9 @@ func TestSearch_TextIndex(t *testing.T) {
 		t.Fatalf("got %d results, want 1", len(results))
 	}
 
-	// Stream-scoped search.
-	results, err = store.Search(ctx, "stream-a", "user")
+	// Stream-scoped search — "alice" is a payload value present in both stream-a docs.
+	// MongoDB $text indexes field values (not keys), so we must search for a value.
+	results, err = store.Search(ctx, "stream-a", "alice")
 	if err != nil {
 		t.Fatalf("Search stream-a: %v", err)
 	}

@@ -76,7 +76,7 @@ test-pg: pg-start
 test-sqlite:
     go test -v -count=1 ./sqlite/...
 
-# Start MongoDB for testing
+# Start MongoDB replica set for testing
 mongo-start:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -84,11 +84,26 @@ mongo-start:
         echo "Removing existing container {{MONGO_CONTAINER}}..."
         {{DOCKER}} rm -f {{MONGO_CONTAINER}} > /dev/null
     fi
-    echo "Starting MongoDB on port {{MONGO_PORT}}..."
-    {{DOCKER}} run -d --name {{MONGO_CONTAINER}} -p {{MONGO_PORT}}:27017 {{MONGO_IMAGE}}
-    echo "Waiting for MongoDB to start..."
-    sleep 3
-    echo "MongoDB ready on port {{MONGO_PORT}}"
+    echo "Starting MongoDB replica set on port {{MONGO_PORT}}..."
+    {{DOCKER}} run -d --name {{MONGO_CONTAINER}} -p {{MONGO_PORT}}:27017 {{MONGO_IMAGE}} --replSet rs0
+    echo "Waiting for MongoDB to be ready..."
+    for i in $(seq 1 30); do
+        if {{DOCKER}} exec {{MONGO_CONTAINER}} mongosh --quiet --eval "db.adminCommand('ping').ok" 2>/dev/null | grep -q "1"; then
+            break
+        fi
+        sleep 1
+    done
+    echo "Initialising replica set..."
+    {{DOCKER}} exec {{MONGO_CONTAINER}} mongosh --quiet --eval \
+        "rs.initiate({_id:'rs0',members:[{_id:0,host:'localhost:27017'}]})"
+    echo "Waiting for primary election..."
+    for i in $(seq 1 30); do
+        if {{DOCKER}} exec {{MONGO_CONTAINER}} mongosh --quiet --eval "rs.isMaster().ismaster" 2>/dev/null | grep -q "true"; then
+            break
+        fi
+        sleep 1
+    done
+    echo "MongoDB replica set ready on port {{MONGO_PORT}}"
 
 # Stop MongoDB container
 mongo-stop:
