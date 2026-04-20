@@ -454,7 +454,10 @@ func (s *Store) Search(ctx context.Context, stream string, query string, opts ..
 
 	if o.HasAfter() {
 		after, _ := ledger.AfterValue[string](o)
-		oid, _ := bson.ObjectIDFromHex(after)
+		oid, err := bson.ObjectIDFromHex(after)
+		if err != nil {
+			return nil, fmt.Errorf("ledger/mongodb: invalid cursor: %w", err)
+		}
 		if o.Order() == ledger.Descending {
 			filter = append(filter, bson.E{Key: "_id", Value: bson.D{{Key: "$lt", Value: oid}}})
 		} else {
@@ -564,7 +567,7 @@ func (s *Store) EnsureSearchIndex(ctx context.Context) error {
 		return ledger.ErrStoreClosed
 	}
 	if s.atlasIndex != "" {
-		return fmt.Errorf("ledger/mongodb: EnsureSearchIndex is not applicable for Atlas Search; create the index in the Atlas UI")
+		return fmt.Errorf("ledger/mongodb: EnsureSearchIndex is not applicable for Atlas Search; create the index in the Atlas UI: %w", ledger.ErrNotSupported)
 	}
 	model := mongo.IndexModel{
 		Keys: bson.D{{Key: "payload", Value: "text"}},

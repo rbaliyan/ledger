@@ -214,10 +214,10 @@ func TestEnsureSearchIndex_Mongo(t *testing.T) {
 		t.Fatalf("EnsureSearchIndex (second, idempotent): %v", err)
 	}
 
-	// Atlas mode — must return an error; user manages the index externally.
+	// Atlas mode — must return ErrNotSupported; user manages the index externally.
 	atlasStore := newSearchStore(t, "ledger_atlas_idx_test", mongodb.WithAtlasSearch("my-index"))
-	if err := atlasStore.EnsureSearchIndex(ctx); err == nil {
-		t.Fatal("expected error calling EnsureSearchIndex with WithAtlasSearch")
+	if err := atlasStore.EnsureSearchIndex(ctx); !errors.Is(err, ledger.ErrNotSupported) {
+		t.Fatalf("EnsureSearchIndex with WithAtlasSearch: got %v, want ErrNotSupported", err)
 	}
 }
 

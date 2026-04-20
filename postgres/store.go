@@ -459,7 +459,9 @@ func (s *Store) Stat(ctx context.Context, stream string) (ledger.StreamStat[int6
 	}, nil
 }
 
-// Search performs a full-text search on entry payloads using ILIKE.
+// Search performs a full-text search on entry payloads. Without [WithFullTextSearch]
+// it uses a case-insensitive substring match (ILIKE); with it, uses tsvector @@
+// plainto_tsquery for ranked full-text search.
 func (s *Store) Search(ctx context.Context, stream string, query string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[int64, json.RawMessage], error) {
 	if s.closed.Load() {
 		return nil, ledger.ErrStoreClosed
@@ -547,6 +549,9 @@ func (s *Store) Search(ctx context.Context, stream string, query string, opts ..
 		}
 		entries = append(entries, e)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ledger/postgres: search rows: %w", err)
+	}
 	return entries, nil
 }
 
@@ -561,7 +566,7 @@ func (s *Store) EnsureSearchIndex(ctx context.Context) error {
 		return ledger.ErrStoreClosed
 	}
 	if !s.ftsEnabled {
-		return fmt.Errorf("ledger/postgres: EnsureSearchIndex requires WithFullTextSearch() option")
+		return fmt.Errorf("ledger/postgres: EnsureSearchIndex requires WithFullTextSearch() option: %w", ledger.ErrNotSupported)
 	}
 	// #nosec G201 -- table name validated by ValidateName
 	idx := fmt.Sprintf(

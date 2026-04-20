@@ -212,10 +212,10 @@ func TestSearch_FTS(t *testing.T) {
 func TestEnsureSearchIndex_Postgres(t *testing.T) {
 	ctx := context.Background()
 
-	// Without WithFullTextSearch — must return an error.
+	// Without WithFullTextSearch — must return ErrNotSupported.
 	store := newTestStore(t)
-	if err := store.EnsureSearchIndex(ctx); err == nil {
-		t.Fatal("expected error calling EnsureSearchIndex without WithFullTextSearch")
+	if err := store.EnsureSearchIndex(ctx); !errors.Is(err, ledger.ErrNotSupported) {
+		t.Fatalf("EnsureSearchIndex without WithFullTextSearch: got %v, want ErrNotSupported", err)
 	}
 
 	// With WithFullTextSearch — must be idempotent.
