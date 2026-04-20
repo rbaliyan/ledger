@@ -33,10 +33,12 @@ type sqlExecutor interface {
 }
 
 var (
-	_ ledger.Store[int64, json.RawMessage] = (*Store)(nil)
-	_ ledger.HealthChecker                 = (*Store)(nil)
-	_ ledger.CursorStore                   = (*Store)(nil)
-	_ ledger.SourceIDLookup[int64]         = (*Store)(nil)
+	_ ledger.Store[int64, json.RawMessage]    = (*Store)(nil)
+	_ ledger.HealthChecker                    = (*Store)(nil)
+	_ ledger.CursorStore                      = (*Store)(nil)
+	_ ledger.SourceIDLookup[int64]            = (*Store)(nil)
+	_ ledger.Searcher[int64, json.RawMessage] = (*Store)(nil)
+	_ ledger.SearchIndexer                    = (*Store)(nil)
 )
 
 // Store is a PostgreSQL ledger store.
@@ -47,6 +49,7 @@ type Store struct {
 	closed      atomic.Bool
 	mutationLog ledger.Store[int64, json.RawMessage]
 	appendOnly  bool
+	ftsEnabled  bool
 }
 
 // Option configures the PostgreSQL store.
@@ -57,6 +60,7 @@ type options struct {
 	logger      *slog.Logger
 	mutationLog ledger.Store[int64, json.RawMessage]
 	appendOnly  bool
+	ftsEnabled  bool
 }
 
 // WithTable sets the table name. Defaults to "ledger_entries".
@@ -81,6 +85,14 @@ func WithAppendOnly() Option {
 	return func(o *options) { o.appendOnly = true }
 }
 
+// WithFullTextSearch switches Search from ILIKE substring matching to PostgreSQL
+// tsvector full-text search. Call [Store.EnsureSearchIndex] once at startup to
+// create the backing GIN expression index; without the index Search still works
+// but performs a sequential scan.
+func WithFullTextSearch() Option {
+	return func(o *options) { o.ftsEnabled = true }
+}
+
 // New creates a new PostgreSQL ledger store. The table and indexes are created
 // automatically. Tag GIN indexes are created asynchronously in the background.
 func New(ctx context.Context, db *sql.DB, opts ...Option) (*Store, error) {
@@ -95,7 +107,7 @@ func New(ctx context.Context, db *sql.DB, opts ...Option) (*Store, error) {
 		return nil, fmt.Errorf("ledger/postgres: %w", err)
 	}
 
-	s := &Store{db: db, table: o.table, logger: o.logger, mutationLog: o.mutationLog, appendOnly: o.appendOnly}
+	s := &Store{db: db, table: o.table, logger: o.logger, mutationLog: o.mutationLog, appendOnly: o.appendOnly, ftsEnabled: o.ftsEnabled}
 	if err := s.createTable(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/postgres: create table: %w", err)
 	}
@@ -422,6 +434,154 @@ func (s *Store) Count(ctx context.Context, stream string) (int64, error) {
 		return 0, fmt.Errorf("ledger/postgres: count: %w", err)
 	}
 	return count, nil
+}
+
+// Stat returns metrics for the named stream.
+func (s *Store) Stat(ctx context.Context, stream string) (ledger.StreamStat[int64], error) {
+	if s.closed.Load() {
+		return ledger.StreamStat[int64]{}, ledger.ErrStoreClosed
+	}
+	exec := s.executor(ctx)
+	query := fmt.Sprintf(`SELECT COUNT(*), MIN(id), MAX(id) FROM %s WHERE stream = $1`, s.table)
+	var (
+		count int64
+		minID sql.NullInt64
+		maxID sql.NullInt64
+	)
+	if err := exec.QueryRowContext(ctx, query, stream).Scan(&count, &minID, &maxID); err != nil {
+		return ledger.StreamStat[int64]{}, fmt.Errorf("ledger/postgres: stat: %w", err)
+	}
+	return ledger.StreamStat[int64]{
+		Stream:  stream,
+		Count:   count,
+		FirstID: minID.Int64,
+		LastID:  maxID.Int64,
+	}, nil
+}
+
+// Search performs a full-text search on entry payloads. Without [WithFullTextSearch]
+// it uses a case-insensitive substring match (ILIKE); with it, uses tsvector @@
+// plainto_tsquery for ranked full-text search.
+func (s *Store) Search(ctx context.Context, stream string, query string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[int64, json.RawMessage], error) {
+	if s.closed.Load() {
+		return nil, ledger.ErrStoreClosed
+	}
+
+	exec := s.executor(ctx)
+	o := ledger.ApplyReadOptions(opts...)
+
+	var (
+		clauses []string
+		args    []any
+		argN    int
+	)
+
+	if stream != "" {
+		argN++
+		clauses = append(clauses, fmt.Sprintf("stream = $%d", argN))
+		args = append(args, stream)
+	}
+
+	argN++
+	if s.ftsEnabled {
+		// encode(payload,'escape') is IMMUTABLE (unlike convert_from) and produces
+		// the original UTF-8 string for ASCII-safe JSON payloads; the same expression
+		// must be used in both the query and the GIN index created by EnsureSearchIndex.
+		clauses = append(clauses, fmt.Sprintf(
+			"to_tsvector('english', encode(payload, 'escape')) @@ plainto_tsquery('english', $%d)", argN))
+		args = append(args, query)
+	} else {
+		clauses = append(clauses, fmt.Sprintf("convert_from(payload, 'UTF8') ILIKE $%d", argN))
+		args = append(args, "%"+query+"%")
+	}
+
+	if o.HasAfter() {
+		after, _ := ledger.AfterValue[int64](o)
+		argN++
+		if o.Order() == ledger.Descending {
+			clauses = append(clauses, fmt.Sprintf("id < $%d", argN))
+		} else {
+			clauses = append(clauses, fmt.Sprintf("id > $%d", argN))
+		}
+		args = append(args, after)
+	}
+
+	dir := "ASC"
+	if o.Order() == ledger.Descending {
+		dir = "DESC"
+	}
+
+	argN++
+	sqlQuery := fmt.Sprintf(
+		`SELECT id, stream, payload, order_key, dedup_key, schema_version, metadata, tags, annotations, created_at, updated_at FROM %s WHERE %s ORDER BY id %s LIMIT $%d`,
+		s.table, strings.Join(clauses, " AND "), dir, argN,
+	)
+	args = append(args, o.Limit())
+
+	rows, err := exec.QueryContext(ctx, sqlQuery, args...)
+	if err != nil {
+		return nil, fmt.Errorf("ledger/postgres: search: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []ledger.StoredEntry[int64, json.RawMessage]
+	for rows.Next() {
+		var (
+			e            ledger.StoredEntry[int64, json.RawMessage]
+			payloadBytes []byte
+			meta         []byte
+			tagsJSON     []byte
+			annotations  []byte
+			updatedAt    sql.NullTime
+		)
+		if err := rows.Scan(&e.ID, &e.Stream, &payloadBytes, &e.OrderKey, &e.DedupKey, &e.SchemaVersion, &meta, &tagsJSON, &annotations, &e.CreatedAt, &updatedAt); err != nil {
+			return nil, fmt.Errorf("ledger/postgres: scan: %w", err)
+		}
+		e.Payload = json.RawMessage(payloadBytes)
+		if len(meta) > 0 {
+			e.Metadata, _ = decodeJSONB(meta)
+		}
+		if len(tagsJSON) > 0 {
+			json.Unmarshal(tagsJSON, &e.Tags) //nolint:errcheck
+		}
+		if len(annotations) > 0 {
+			e.Annotations, _ = decodeJSONB(annotations)
+		}
+		if updatedAt.Valid {
+			e.UpdatedAt = &updatedAt.Time
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ledger/postgres: search rows: %w", err)
+	}
+	return entries, nil
+}
+
+// EnsureSearchIndex creates the GIN expression index required for efficient
+// full-text search. Requires [WithFullTextSearch] to be set; returns an error
+// otherwise. The operation is idempotent (CREATE INDEX … IF NOT EXISTS).
+//
+// CREATE INDEX CONCURRENTLY does not block reads or writes but cannot run
+// inside a transaction. Call this once at application startup, not per request.
+func (s *Store) EnsureSearchIndex(ctx context.Context) error {
+	if s.closed.Load() {
+		return ledger.ErrStoreClosed
+	}
+	if !s.ftsEnabled {
+		return fmt.Errorf("ledger/postgres: EnsureSearchIndex requires WithFullTextSearch() option: %w", ledger.ErrNotSupported)
+	}
+	// encode(payload,'escape') is IMMUTABLE (PostgreSQL requires IMMUTABLE for index
+	// expressions). For ASCII-safe JSON payloads it produces the original string.
+	// #nosec G201 -- table name validated by ValidateName
+	idx := fmt.Sprintf(
+		`CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_%s_payload_fts ON %s USING GIN(to_tsvector('english', encode(payload, 'escape')))`,
+		s.table, s.table,
+	)
+	if _, err := s.db.ExecContext(ctx, idx); err != nil {
+		return fmt.Errorf("ledger/postgres: create FTS index: %w", err)
+	}
+	return nil
 }
 
 // SetTags replaces all tags on an entry.

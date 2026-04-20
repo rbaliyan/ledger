@@ -49,6 +49,9 @@ type Store[I comparable, P any] interface {
 	// Count returns the number of entries in the named stream.
 	Count(ctx context.Context, stream string) (int64, error)
 
+	// Stat returns metrics for the named stream.
+	Stat(ctx context.Context, stream string) (StreamStat[I], error)
+
 	// SetTags replaces all tags on an entry. Tags are mutable labels for
 	// categorization and filtering (e.g., "processed", "archived").
 	SetTags(ctx context.Context, stream string, id I, tags []string) error
@@ -73,6 +76,38 @@ type Store[I comparable, P any] interface {
 	// Close releases resources held by the store. The caller is responsible for
 	// closing the underlying database connection.
 	Close(ctx context.Context) error
+}
+
+// StreamStat holds metrics for a stream.
+type StreamStat[I comparable] struct {
+	Stream  string // Stream name.
+	Count   int64  // Total number of entries.
+	FirstID I      // ID of the oldest entry.
+	LastID  I      // ID of the newest entry.
+}
+
+// Searcher is an optional interface that Store implementations may provide
+// to support full-text search on entry payloads.
+// Backends that do not support search should not implement this interface;
+// callers detect absence via a type assertion and return [ErrNotSupported].
+type Searcher[I comparable, P any] interface {
+	Search(ctx context.Context, stream string, query string, opts ...ReadOption) ([]StoredEntry[I, P], error)
+}
+
+// SearchIndexer is an optional interface for stores that support managed search
+// indexes. Call [SearchIndexer.EnsureSearchIndex] once at startup — after
+// constructing the store with a search-mode option — to create the backing index.
+//
+// For PostgreSQL, [postgres.WithFullTextSearch] switches Search from ILIKE to
+// tsvector/GIN; EnsureSearchIndex creates the expression-based GIN index.
+// For MongoDB, EnsureSearchIndex creates the text index required by the default
+// $text-based Search. With [mongodb.WithAtlasSearch] the index is managed outside
+// this library and EnsureSearchIndex returns an error.
+//
+// If Search is called before EnsureSearchIndex (or before the index is created
+// manually), the database returns an error — there is no silent fallback.
+type SearchIndexer interface {
+	EnsureSearchIndex(ctx context.Context) error
 }
 
 // HealthChecker is an optional interface that Store implementations may provide

@@ -21,7 +21,7 @@ import (
 const bufSize = 1 << 20
 
 // newTestBackend creates a fresh in-memory SQLite backend for each test.
-func newTestBackend(t *testing.T) ledgerpb.Backend {
+func newTestBackend(t *testing.T) ledgerpb.Provider {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	if err != nil {
@@ -36,11 +36,11 @@ func newTestBackend(t *testing.T) ledgerpb.Backend {
 	}
 	t.Cleanup(func() { store.Close(context.Background()) })
 
-	return ledgerpb.NewInt64Backend(store)
+	return ledgerpb.NewInt64Provider(store)
 }
 
 // newTestServer starts an in-process gRPC server and returns a client + cleanup func.
-func newTestServer(t *testing.T, backend ledgerpb.Backend, opts ...grpc.ServerOption) (ledgerv1.LedgerServiceClient, func()) {
+func newTestServer(t *testing.T, backend ledgerpb.Provider, opts ...grpc.ServerOption) (ledgerv1.LedgerServiceClient, func()) {
 	t.Helper()
 
 	lis := bufconn.Listen(bufSize)

@@ -30,10 +30,12 @@ import (
 )
 
 var (
-	_ ledger.Store[string, bson.Raw] = (*Store)(nil)
-	_ ledger.HealthChecker           = (*Store)(nil)
-	_ ledger.CursorStore             = (*Store)(nil)
-	_ ledger.SourceIDLookup[string]  = (*Store)(nil)
+	_ ledger.Store[string, bson.Raw]  = (*Store)(nil)
+	_ ledger.HealthChecker            = (*Store)(nil)
+	_ ledger.CursorStore              = (*Store)(nil)
+	_ ledger.SourceIDLookup[string]   = (*Store)(nil)
+	_ ledger.Searcher[string, bson.Raw] = (*Store)(nil)
+	_ ledger.SearchIndexer            = (*Store)(nil)
 )
 
 type entry struct {
@@ -60,6 +62,7 @@ type Store struct {
 	logger      *slog.Logger
 	closed      atomic.Bool
 	appendOnly  bool
+	atlasIndex  string // non-empty enables Atlas Search via $search aggregation
 }
 
 // Option configures the MongoDB store.
@@ -70,6 +73,7 @@ type options struct {
 	logger      *slog.Logger
 	mutationLog ledger.Store[string, json.RawMessage]
 	appendOnly  bool
+	atlasIndex  string
 }
 
 // WithCollection sets the collection name. Defaults to "ledger_entries".
@@ -86,6 +90,18 @@ func WithLogger(l *slog.Logger) Option {
 // Use this when the replication sink (e.g. ClickHouse) does not support entry mutations.
 func WithAppendOnly() Option {
 	return func(o *options) { o.appendOnly = true }
+}
+
+// WithAtlasSearch switches Search to use a MongoDB Atlas Search index via the
+// $search aggregation stage. indexName must match the Atlas Search index name
+// configured in the Atlas UI (the index must be created there beforehand).
+// [Store.EnsureSearchIndex] returns an error in this mode — Atlas indexes are
+// managed outside this library.
+//
+// Without this option, Search uses the $text operator, which requires a standard
+// text index on the payload field — create it with [Store.EnsureSearchIndex].
+func WithAtlasSearch(indexName string) Option {
+	return func(o *options) { o.atlasIndex = indexName }
 }
 
 // WithMutationLog enables mutation logging. Every successful write
@@ -118,7 +134,7 @@ func New(ctx context.Context, db *mongo.Database, opts ...Option) (*Store, error
 
 	coll := db.Collection(o.collection)
 	cursors := db.Collection(o.collection + "_cursors")
-	s := &Store{db: db, coll: coll, cursors: cursors, mutationLog: o.mutationLog, logger: o.logger, appendOnly: o.appendOnly}
+	s := &Store{db: db, coll: coll, cursors: cursors, mutationLog: o.mutationLog, logger: o.logger, appendOnly: o.appendOnly, atlasIndex: o.atlasIndex}
 	if err := s.ensureIndexes(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/mongodb: ensure indexes: %w", err)
 	}
@@ -370,6 +386,228 @@ func (s *Store) Count(ctx context.Context, stream string) (int64, error) {
 		return 0, fmt.Errorf("ledger/mongodb: count: %w", err)
 	}
 	return n, nil
+}
+
+// Stat returns metrics for the named stream.
+func (s *Store) Stat(ctx context.Context, stream string) (ledger.StreamStat[string], error) {
+	if s.closed.Load() {
+		return ledger.StreamStat[string]{}, ledger.ErrStoreClosed
+	}
+	ctx = s.sessionCtx(ctx)
+	pipeline := mongo.Pipeline{
+		{{Key: "$match", Value: bson.D{{Key: "stream", Value: stream}}}},
+		{{Key: "$group", Value: bson.D{
+			{Key: "_id", Value: nil},
+			{Key: "count", Value: bson.D{{Key: "$sum", Value: 1}}},
+			{Key: "min", Value: bson.D{{Key: "$min", Value: "$_id"}}},
+			{Key: "max", Value: bson.D{{Key: "$max", Value: "$_id"}}},
+		}}},
+	}
+	cursor, err := s.coll.Aggregate(ctx, pipeline)
+	if err != nil {
+		return ledger.StreamStat[string]{}, fmt.Errorf("ledger/mongodb: stat: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	if !cursor.Next(ctx) {
+		return ledger.StreamStat[string]{Stream: stream}, nil
+	}
+
+	var res struct {
+		Count int64         `bson:"count"`
+		Min   bson.ObjectID `bson:"min"`
+		Max   bson.ObjectID `bson:"max"`
+	}
+	if err := cursor.Decode(&res); err != nil {
+		return ledger.StreamStat[string]{}, fmt.Errorf("ledger/mongodb: decode stat: %w", err)
+	}
+	return ledger.StreamStat[string]{
+		Stream:  stream,
+		Count:   res.Count,
+		FirstID: res.Min.Hex(),
+		LastID:  res.Max.Hex(),
+	}, nil
+}
+
+// Search performs a full-text search on entry payloads.
+//
+// Default mode: uses the MongoDB $text operator, which requires a text index on
+// the payload field. Create it with [Store.EnsureSearchIndex].
+//
+// With [WithAtlasSearch]: uses a $search aggregation stage against the configured
+// Atlas Search index. The index must be created in the Atlas UI beforehand.
+func (s *Store) Search(ctx context.Context, stream string, query string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[string, bson.Raw], error) {
+	if s.closed.Load() {
+		return nil, ledger.ErrStoreClosed
+	}
+	if s.atlasIndex != "" {
+		return s.searchAtlas(ctx, stream, query, opts...)
+	}
+
+	ctx = s.sessionCtx(ctx)
+	o := ledger.ApplyReadOptions(opts...)
+
+	filter := bson.D{{Key: "$text", Value: bson.D{{Key: "$search", Value: query}}}}
+	if stream != "" {
+		filter = append(filter, bson.E{Key: "stream", Value: stream})
+	}
+
+	if o.HasAfter() {
+		after, _ := ledger.AfterValue[string](o)
+		oid, err := bson.ObjectIDFromHex(after)
+		if err != nil {
+			return nil, fmt.Errorf("ledger/mongodb: invalid cursor: %w", err)
+		}
+		if o.Order() == ledger.Descending {
+			filter = append(filter, bson.E{Key: "_id", Value: bson.D{{Key: "$lt", Value: oid}}})
+		} else {
+			filter = append(filter, bson.E{Key: "_id", Value: bson.D{{Key: "$gt", Value: oid}}})
+		}
+	}
+
+	sortDir := 1
+	if o.Order() == ledger.Descending {
+		sortDir = -1
+	}
+
+	findOpts := mongoopts.Find().
+		SetSort(bson.D{{Key: "_id", Value: sortDir}}).
+		SetLimit(int64(o.Limit()))
+
+	cursor, err := s.coll.Find(ctx, filter, findOpts)
+	if err != nil {
+		return nil, fmt.Errorf("ledger/mongodb: search: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	return s.decodeCursor(ctx, cursor, "search")
+}
+
+// searchAtlas executes a $search aggregation using MongoDB Atlas Search.
+func (s *Store) searchAtlas(ctx context.Context, stream, query string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[string, bson.Raw], error) {
+	ctx = s.sessionCtx(ctx)
+	o := ledger.ApplyReadOptions(opts...)
+
+	// Build the $search stage. Use compound when stream filter is needed so
+	// Atlas evaluates the filter before scoring rather than post-$match.
+	var searchStage bson.D
+	if stream != "" {
+		searchStage = bson.D{
+			{Key: "index", Value: s.atlasIndex},
+			{Key: "compound", Value: bson.D{
+				{Key: "must", Value: bson.A{
+					bson.D{{Key: "text", Value: bson.D{
+						{Key: "query", Value: query},
+						{Key: "path", Value: "payload"},
+					}}},
+				}},
+				{Key: "filter", Value: bson.A{
+					bson.D{{Key: "equals", Value: bson.D{
+						{Key: "path", Value: "stream"},
+						{Key: "value", Value: stream},
+					}}},
+				}},
+			}},
+		}
+	} else {
+		searchStage = bson.D{
+			{Key: "index", Value: s.atlasIndex},
+			{Key: "text", Value: bson.D{
+				{Key: "query", Value: query},
+				{Key: "path", Value: "payload"},
+			}},
+		}
+	}
+
+	pipeline := mongo.Pipeline{
+		{{Key: "$search", Value: searchStage}},
+	}
+
+	// Cursor filter — applied after $search so Atlas scores all matches first.
+	if o.HasAfter() {
+		after, _ := ledger.AfterValue[string](o)
+		oid, err := bson.ObjectIDFromHex(after)
+		if err != nil {
+			return nil, fmt.Errorf("ledger/mongodb: invalid cursor: %w", err)
+		}
+		var idCmp bson.D
+		if o.Order() == ledger.Descending {
+			idCmp = bson.D{{Key: "$lt", Value: oid}}
+		} else {
+			idCmp = bson.D{{Key: "$gt", Value: oid}}
+		}
+		pipeline = append(pipeline, bson.D{{Key: "$match", Value: bson.D{{Key: "_id", Value: idCmp}}}})
+	}
+
+	sortDir := 1
+	if o.Order() == ledger.Descending {
+		sortDir = -1
+	}
+	pipeline = append(pipeline,
+		bson.D{{Key: "$sort", Value: bson.D{{Key: "_id", Value: sortDir}}}},
+		bson.D{{Key: "$limit", Value: int64(o.Limit())}},
+	)
+
+	cursor, err := s.coll.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, fmt.Errorf("ledger/mongodb: atlas search: %w", err)
+	}
+	defer cursor.Close(ctx)
+
+	return s.decodeCursor(ctx, cursor, "atlas search")
+}
+
+// EnsureSearchIndex creates a wildcard text index ($**) on the collection,
+// enabling $text-based Search across all string fields in every document
+// (including nested fields within the payload subdocument). The operation is
+// idempotent.
+//
+// Returns an error when [WithAtlasSearch] is configured — Atlas Search indexes
+// must be created in the Atlas UI; this library does not manage them.
+func (s *Store) EnsureSearchIndex(ctx context.Context) error {
+	if s.closed.Load() {
+		return ledger.ErrStoreClosed
+	}
+	if s.atlasIndex != "" {
+		return fmt.Errorf("ledger/mongodb: EnsureSearchIndex is not applicable for Atlas Search; create the index in the Atlas UI: %w", ledger.ErrNotSupported)
+	}
+	// Wildcard text index covers all string fields recursively, including those
+	// nested inside the payload subdocument regardless of schema.
+	model := mongo.IndexModel{
+		Keys: bson.D{{Key: "$**", Value: "text"}},
+	}
+	if _, err := s.coll.Indexes().CreateOne(ctx, model); err != nil {
+		return fmt.Errorf("ledger/mongodb: create text index: %w", err)
+	}
+	return nil
+}
+
+// decodeCursor drains a mongo.Cursor into a StoredEntry slice.
+func (s *Store) decodeCursor(ctx context.Context, cursor *mongo.Cursor, op string) ([]ledger.StoredEntry[string, bson.Raw], error) {
+	var entries []ledger.StoredEntry[string, bson.Raw]
+	for cursor.Next(ctx) {
+		var doc entry
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, fmt.Errorf("ledger/mongodb: %s decode: %w", op, err)
+		}
+		entries = append(entries, ledger.StoredEntry[string, bson.Raw]{
+			ID:            doc.ID.Hex(),
+			Stream:        doc.Stream,
+			Payload:       doc.Payload,
+			OrderKey:      doc.OrderKey,
+			DedupKey:      doc.DedupKey,
+			SchemaVersion: doc.SchemaVersion,
+			Metadata:      doc.Metadata,
+			Tags:          doc.Tags,
+			Annotations:   doc.Annotations,
+			CreatedAt:     doc.CreatedAt,
+			UpdatedAt:     doc.UpdatedAt,
+		})
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, fmt.Errorf("ledger/mongodb: %s cursor: %w", op, err)
+	}
+	return entries, nil
 }
 
 // SetTags replaces all tags on an entry.

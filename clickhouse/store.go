@@ -302,6 +302,34 @@ func (s *Store) Count(ctx context.Context, stream string) (int64, error) {
 	return n, nil
 }
 
+// Stat returns metrics for the named stream.
+func (s *Store) Stat(ctx context.Context, stream string) (ledger.StreamStat[string], error) {
+	if s.closed.Load() {
+		return ledger.StreamStat[string]{}, ledger.ErrStoreClosed
+	}
+	var (
+		count    int64
+		firstID  string
+		lastID   string
+	)
+	query := fmt.Sprintf(`SELECT count(), min(id), max(id) FROM %s WHERE stream = ?`, s.table) // #nosec G201
+	err := s.db.QueryRowContext(ctx, query, stream).Scan(&count, &firstID, &lastID)
+	if err != nil {
+		return ledger.StreamStat[string]{}, fmt.Errorf("ledger/clickhouse: stat: %w", err)
+	}
+	return ledger.StreamStat[string]{
+		Stream:  stream,
+		Count:   count,
+		FirstID: firstID,
+		LastID:  lastID,
+	}, nil
+}
+
+// Search is not supported by the ClickHouse backend.
+func (s *Store) Search(_ context.Context, _, _ string, _ ...ledger.ReadOption) ([]ledger.StoredEntry[string, json.RawMessage], error) {
+	return nil, ledger.ErrNotSupported
+}
+
 // SetTags is not supported by the ClickHouse backend.
 // Always returns [ledger.ErrNotSupported].
 func (s *Store) SetTags(_ context.Context, _, _ string, _ []string) error {
@@ -445,7 +473,8 @@ func (s *Store) Health(ctx context.Context) error {
 	return s.db.PingContext(ctx)
 }
 
-// Close marks the store as closed.
+// Close marks the store as closed. It does not close the underlying db since
+// that is provided externally and owned by the caller.
 func (s *Store) Close(_ context.Context) error {
 	s.closed.Store(true)
 	return nil

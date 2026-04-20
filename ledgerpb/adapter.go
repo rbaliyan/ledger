@@ -9,18 +9,18 @@ import (
 	"github.com/rbaliyan/ledger"
 )
 
-// int64Backend adapts Store[int64, json.RawMessage] to Backend.
+// int64Backend adapts Store[int64, json.RawMessage] to Provider.
 // Integer IDs are serialised as decimal strings.
 type int64Backend struct {
 	store  ledger.Store[int64, json.RawMessage]
 	health func(context.Context) error
 }
 
-// NewInt64Backend wraps a Store[int64, json.RawMessage] (SQLite, PostgreSQL) as a
-// Backend for the gRPC Server. Integer IDs are exposed as decimal strings on the wire.
+// NewInt64Provider wraps a Store[int64, json.RawMessage] (SQLite, PostgreSQL) as a
+// Provider for the gRPC Server. Integer IDs are exposed as decimal strings on the wire.
 //
 // If the store also implements ledger.HealthChecker the Health endpoint is enabled.
-func NewInt64Backend(s ledger.Store[int64, json.RawMessage]) Backend {
+func NewInt64Provider(s ledger.Store[int64, json.RawMessage]) Provider {
 	b := &int64Backend{store: s}
 	if hc, ok := s.(ledger.HealthChecker); ok {
 		b.health = hc.Health
@@ -71,6 +71,19 @@ func (b *int64Backend) Count(ctx context.Context, stream string) (int64, error) 
 	return b.store.Count(ctx, stream)
 }
 
+func (b *int64Backend) Stat(ctx context.Context, stream string) (StreamStat, error) {
+	s, err := b.store.Stat(ctx, stream)
+	if err != nil {
+		return StreamStat{}, err
+	}
+	return StreamStat{
+		Stream:  s.Stream,
+		Count:   s.Count,
+		FirstID: strconv.FormatInt(s.FirstID, 10),
+		LastID:  strconv.FormatInt(s.LastID, 10),
+	}, nil
+}
+
 func (b *int64Backend) SetTags(ctx context.Context, stream string, id string, tags []string) error {
 	n, err := parseIntID(id)
 	if err != nil {
@@ -113,17 +126,37 @@ func (b *int64Backend) Health(ctx context.Context) error {
 	return nil
 }
 
-// stringBackend adapts Store[string, json.RawMessage] to Backend.
+func (b *int64Backend) Search(ctx context.Context, stream string, query string, opts ReadOptions) ([]StoredEntry, error) {
+	searcher, ok := b.store.(ledger.Searcher[int64, json.RawMessage])
+	if !ok {
+		return nil, ledger.ErrNotSupported
+	}
+	ropts, err := opts.toInt64Opts()
+	if err != nil {
+		return nil, err
+	}
+	entries, err := searcher.Search(ctx, stream, query, ropts...)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]StoredEntry, len(entries))
+	for i, e := range entries {
+		out[i] = storedFromInt64(e)
+	}
+	return out, nil
+}
+
+// stringBackend adapts Store[string, json.RawMessage] to Provider.
 type stringBackend struct {
 	store  ledger.Store[string, json.RawMessage]
 	health func(context.Context) error
 }
 
-// NewStringBackend wraps a Store[string, json.RawMessage] (MongoDB) as a Backend
+// NewStringProvider wraps a Store[string, json.RawMessage] (MongoDB) as a Provider
 // for the gRPC Server.
 //
 // If the store also implements ledger.HealthChecker the Health endpoint is enabled.
-func NewStringBackend(s ledger.Store[string, json.RawMessage]) Backend {
+func NewStringProvider(s ledger.Store[string, json.RawMessage]) Provider {
 	b := &stringBackend{store: s}
 	if hc, ok := s.(ledger.HealthChecker); ok {
 		b.health = hc.Health
@@ -162,6 +195,19 @@ func (b *stringBackend) Count(ctx context.Context, stream string) (int64, error)
 	return b.store.Count(ctx, stream)
 }
 
+func (b *stringBackend) Stat(ctx context.Context, stream string) (StreamStat, error) {
+	s, err := b.store.Stat(ctx, stream)
+	if err != nil {
+		return StreamStat{}, err
+	}
+	return StreamStat{
+		Stream:  s.Stream,
+		Count:   s.Count,
+		FirstID: s.FirstID,
+		LastID:  s.LastID,
+	}, nil
+}
+
 func (b *stringBackend) SetTags(ctx context.Context, stream string, id string, tags []string) error {
 	return b.store.SetTags(ctx, stream, id, tags)
 }
@@ -192,9 +238,28 @@ func (b *stringBackend) Health(ctx context.Context) error {
 	return nil
 }
 
+func (b *stringBackend) Search(ctx context.Context, stream string, query string, opts ReadOptions) ([]StoredEntry, error) {
+	searcher, ok := b.store.(ledger.Searcher[string, json.RawMessage])
+	if !ok {
+		return nil, ledger.ErrNotSupported
+	}
+	entries, err := searcher.Search(ctx, stream, query, opts.toStringOpts()...)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]StoredEntry, len(entries))
+	for i, e := range entries {
+		out[i] = storedFromString(e)
+	}
+	return out, nil
+}
+
 // parseIntID converts a decimal string ID to int64.
-// Returns ledger.ErrInvalidCursor on parse failure.
+// Returns ledger.ErrInvalidCursor on empty or malformed input.
 func parseIntID(s string) (int64, error) {
+	if s == "" {
+		return 0, fmt.Errorf("%w: id is empty", ledger.ErrInvalidCursor)
+	}
 	n, err := strconv.ParseInt(s, 10, 64)
 	if err != nil {
 		return 0, fmt.Errorf("%w: expected decimal int64 ID, got %q", ledger.ErrInvalidCursor, s)

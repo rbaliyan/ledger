@@ -1,3 +1,8 @@
+// Package otel provides opt-in OpenTelemetry tracing and metrics for any
+// ledger.Store implementation. Wrap an existing store with [WrapStore] to record
+// spans and counters for Append, Read, Count, Trim, and other operations.
+// Both traces and metrics are disabled by default; enable them with
+// [WithTracesEnabled] and [WithMetricsEnabled].
 package otel
 
 import (
@@ -17,8 +22,8 @@ import (
 
 // Compile-time interface checks.
 var (
-	_ ledger.Store[int64, []byte]  = (*InstrumentedStore[int64, []byte])(nil)
-	_ ledger.HealthChecker         = (*InstrumentedStore[int64, []byte])(nil)
+	_ ledger.Store[int64, []byte] = (*InstrumentedStore[int64, []byte])(nil)
+	_ ledger.HealthChecker        = (*InstrumentedStore[int64, []byte])(nil)
 )
 
 // InstrumentedStore wraps a [ledger.Store] with OpenTelemetry tracing and metrics.
@@ -186,6 +191,74 @@ func (s *InstrumentedStore[I, P]) Count(ctx context.Context, stream string) (int
 	}
 
 	return n, err
+}
+
+// Stat returns metrics for the named stream.
+func (s *InstrumentedStore[I, P]) Stat(ctx context.Context, stream string) (ledger.StreamStat[I], error) {
+	if !s.opts.enableTraces {
+		start := time.Now()
+		stat, err := s.store.Stat(ctx, stream)
+		s.recordOperation(ctx, "stat", stream, start, err)
+		return stat, err
+	}
+
+	attrs := append(s.commonAttributes(),
+		attribute.String("ledger.stream", stream),
+	)
+
+	ctx, span := s.tracer.Start(ctx, "ledger.Stat", trace.WithAttributes(attrs...))
+	defer span.End()
+
+	start := time.Now()
+	stat, err := s.store.Stat(ctx, stream)
+	s.recordOperation(ctx, "stat", stream, start, err)
+
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	} else {
+		span.SetStatus(codes.Ok, "")
+		span.SetAttributes(
+			attribute.Int64("ledger.count", stat.Count),
+			attribute.String("ledger.first_id", fmt.Sprintf("%v", stat.FirstID)),
+			attribute.String("ledger.last_id", fmt.Sprintf("%v", stat.LastID)),
+		)
+	}
+
+	return stat, err
+}
+
+// Search performs a full-text search, delegating to the wrapped store if it
+// implements [ledger.Searcher]. Returns [ledger.ErrNotSupported] otherwise.
+func (s *InstrumentedStore[I, P]) Search(ctx context.Context, stream string, query string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[I, P], error) {
+	searcher, ok := s.store.(ledger.Searcher[I, P])
+	if !ok {
+		return nil, ledger.ErrNotSupported
+	}
+	if !s.opts.enableTraces {
+		start := time.Now()
+		entries, err := searcher.Search(ctx, stream, query, opts...)
+		s.recordOperation(ctx, "search", stream, start, err)
+		return entries, err
+	}
+	attrs := append(s.commonAttributes(),
+		attribute.String("ledger.stream", stream),
+		attribute.String("ledger.query", query),
+	)
+	ctx, span := s.tracer.Start(ctx, "ledger.Search", trace.WithAttributes(attrs...))
+	defer span.End()
+
+	start := time.Now()
+	entries, err := searcher.Search(ctx, stream, query, opts...)
+	s.recordOperation(ctx, "search", stream, start, err)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	} else {
+		span.SetStatus(codes.Ok, "")
+		span.SetAttributes(attribute.Int("ledger.result_count", len(entries)))
+	}
+	return entries, err
 }
 
 // SetTags replaces all tags on an entry.

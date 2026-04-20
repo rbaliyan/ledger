@@ -100,6 +100,146 @@ func TestHealth(t *testing.T) {
 
 // TestCrossStoreIsolation verifies that two stores on the same database but
 // different tables do not share any entries: each store represents one type.
+// newFTSStore creates a store with WithFullTextSearch and a unique table name.
+func newFTSStore(t *testing.T) *postgres.Store {
+	t.Helper()
+	dsn := os.Getenv("POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("POSTGRES_DSN not set, skipping integration test")
+	}
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	store, err := postgres.New(context.Background(), db,
+		postgres.WithTable("ledger_fts_test"),
+		postgres.WithFullTextSearch(),
+	)
+	if err != nil {
+		t.Fatalf("new FTS store: %v", err)
+	}
+	t.Cleanup(func() {
+		db.Exec("DROP TABLE IF EXISTS ledger_fts_test") //nolint:errcheck
+		store.Close(context.Background())
+	})
+	db.Exec("TRUNCATE TABLE ledger_fts_test RESTART IDENTITY") //nolint:errcheck
+	return store
+}
+
+// seedSearch appends three entries across two streams and returns them.
+func seedSearchEntries(ctx context.Context, t *testing.T, store interface {
+	Append(context.Context, string, ...ledger.RawEntry[json.RawMessage]) ([]int64, error)
+}) {
+	t.Helper()
+	payloads := []json.RawMessage{
+		json.RawMessage(`{"event":"login","user":"alice"}`),
+		json.RawMessage(`{"event":"logout","user":"alice"}`),
+		json.RawMessage(`{"event":"purchase","user":"bob","item":"widget"}`),
+	}
+	for i, p := range payloads {
+		stream := "stream-a"
+		if i == 2 {
+			stream = "stream-b"
+		}
+		if _, err := store.Append(ctx, stream, ledger.RawEntry[json.RawMessage]{Payload: p, SchemaVersion: 1}); err != nil {
+			t.Fatalf("seed append: %v", err)
+		}
+	}
+}
+
+func TestSearch_ILIKE(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	seedSearchEntries(ctx, t, store)
+
+	// Match across streams — no stream filter.
+	results, err := store.Search(ctx, "", "login")
+	if err != nil {
+		t.Fatalf("Search: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	if !json.Valid(results[0].Payload) {
+		t.Errorf("payload is not valid JSON: %s", results[0].Payload)
+	}
+
+	// Stream-scoped search.
+	results, err = store.Search(ctx, "stream-a", "user")
+	if err != nil {
+		t.Fatalf("Search stream-a: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results for stream-a, want 2", len(results))
+	}
+
+	// No match.
+	results, err = store.Search(ctx, "", "nonexistent_xyz")
+	if err != nil {
+		t.Fatalf("Search no-match: %v", err)
+	}
+	if len(results) != 0 {
+		t.Fatalf("got %d results for no-match, want 0", len(results))
+	}
+}
+
+func TestSearch_FTS(t *testing.T) {
+	store := newFTSStore(t)
+	ctx := context.Background()
+	seedSearchEntries(ctx, t, store)
+
+	// Full-text search across all streams.
+	results, err := store.Search(ctx, "", "login")
+	if err != nil {
+		t.Fatalf("Search FTS: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+
+	// Stream-scoped FTS.
+	results, err = store.Search(ctx, "stream-a", "user")
+	if err != nil {
+		t.Fatalf("Search FTS stream-a: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("got %d results, want 2", len(results))
+	}
+}
+
+func TestEnsureSearchIndex_Postgres(t *testing.T) {
+	ctx := context.Background()
+
+	// Without WithFullTextSearch — must return ErrNotSupported.
+	store := newTestStore(t)
+	if err := store.EnsureSearchIndex(ctx); !errors.Is(err, ledger.ErrNotSupported) {
+		t.Fatalf("EnsureSearchIndex without WithFullTextSearch: got %v, want ErrNotSupported", err)
+	}
+
+	// With WithFullTextSearch — must be idempotent.
+	ftsStore := newFTSStore(t)
+	if err := ftsStore.EnsureSearchIndex(ctx); err != nil {
+		t.Fatalf("EnsureSearchIndex (first call): %v", err)
+	}
+	if err := ftsStore.EnsureSearchIndex(ctx); err != nil {
+		t.Fatalf("EnsureSearchIndex (second call, idempotent): %v", err)
+	}
+}
+
+func TestSearch_ClosedStore(t *testing.T) {
+	store := newTestStore(t)
+	store.Close(context.Background())
+	_, err := store.Search(context.Background(), "", "anything")
+	if !errors.Is(err, ledger.ErrStoreClosed) {
+		t.Errorf("Search on closed store: %v, want ErrStoreClosed", err)
+	}
+	if err := store.EnsureSearchIndex(context.Background()); !errors.Is(err, ledger.ErrStoreClosed) {
+		t.Errorf("EnsureSearchIndex on closed store: %v, want ErrStoreClosed", err)
+	}
+}
+
 func TestCrossStoreIsolation(t *testing.T) {
 	dsn := os.Getenv("POSTGRES_DSN")
 	if dsn == "" {

@@ -35,9 +35,10 @@ type sqlExecutor interface {
 }
 
 var (
-	_ ledger.Store[int64, json.RawMessage] = (*Store)(nil)
-	_ ledger.HealthChecker                 = (*Store)(nil)
-	_ ledger.CursorStore                   = (*Store)(nil)
+	_ ledger.Store[int64, json.RawMessage]    = (*Store)(nil)
+	_ ledger.HealthChecker                    = (*Store)(nil)
+	_ ledger.CursorStore                      = (*Store)(nil)
+	_ ledger.Searcher[int64, json.RawMessage] = (*Store)(nil)
 	_ ledger.SourceIDLookup[int64]         = (*Store)(nil)
 )
 
@@ -463,6 +464,128 @@ func (s *Store) Count(ctx context.Context, stream string) (int64, error) {
 		return 0, fmt.Errorf("ledger/sqlite: count: %w", err)
 	}
 	return count, nil
+}
+
+// Stat returns metrics for the named stream.
+func (s *Store) Stat(ctx context.Context, stream string) (ledger.StreamStat[int64], error) {
+	if s.closed.Load() {
+		return ledger.StreamStat[int64]{}, ledger.ErrStoreClosed
+	}
+	exec := s.executor(ctx)
+	query := fmt.Sprintf(`SELECT COUNT(*), MIN(id), MAX(id) FROM %s WHERE stream = ?`, s.table)
+	var (
+		count int64
+		minID sql.NullInt64
+		maxID sql.NullInt64
+	)
+	if err := exec.QueryRowContext(ctx, query, stream).Scan(&count, &minID, &maxID); err != nil {
+		return ledger.StreamStat[int64]{}, fmt.Errorf("ledger/sqlite: stat: %w", err)
+	}
+	return ledger.StreamStat[int64]{
+		Stream:  stream,
+		Count:   count,
+		FirstID: minID.Int64,
+		LastID:  maxID.Int64,
+	}, nil
+}
+
+// Search performs a substring search on entry payloads using LIKE.
+// stream is optional; an empty string searches all streams in this store.
+func (s *Store) Search(ctx context.Context, stream string, query string, opts ...ledger.ReadOption) ([]ledger.StoredEntry[int64, json.RawMessage], error) {
+	if s.closed.Load() {
+		return nil, ledger.ErrStoreClosed
+	}
+	exec := s.executor(ctx)
+	o := ledger.ApplyReadOptions(opts...)
+
+	var clauses []string
+	var args []any
+	if stream != "" {
+		clauses = append(clauses, "stream = ?")
+		args = append(args, stream)
+	}
+	clauses = append(clauses, "CAST(payload AS TEXT) LIKE ?")
+	args = append(args, "%"+query+"%")
+
+	if o.HasAfter() {
+		after, ok := ledger.AfterValue[int64](o)
+		if !ok {
+			return nil, fmt.Errorf("%w: expected int64", ledger.ErrInvalidCursor)
+		}
+		if o.Order() == ledger.Descending {
+			clauses = append(clauses, "id < ?")
+		} else {
+			clauses = append(clauses, "id > ?")
+		}
+		args = append(args, after)
+	}
+
+	dir := "ASC"
+	if o.Order() == ledger.Descending {
+		dir = "DESC"
+	}
+	q := fmt.Sprintf(
+		`SELECT id, stream, payload, order_key, dedup_key, schema_version, metadata, tags, annotations, created_at, updated_at FROM %s WHERE %s ORDER BY id %s LIMIT ?`,
+		s.table, strings.Join(clauses, " AND "), dir,
+	)
+	args = append(args, o.Limit())
+
+	rows, err := exec.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("ledger/sqlite: search: %w", err)
+	}
+	defer rows.Close()
+
+	var entries []ledger.StoredEntry[int64, json.RawMessage]
+	for rows.Next() {
+		var (
+			e            ledger.StoredEntry[int64, json.RawMessage]
+			payloadBytes []byte
+			meta         sql.NullString
+			tagsJSON     string
+			annotations  sql.NullString
+			createdAt    string
+			updatedAt    sql.NullString
+		)
+		if err := rows.Scan(&e.ID, &e.Stream, &payloadBytes, &e.OrderKey, &e.DedupKey, &e.SchemaVersion, &meta, &tagsJSON, &annotations, &createdAt, &updatedAt); err != nil {
+			return nil, fmt.Errorf("ledger/sqlite: search scan: %w", err)
+		}
+		e.Payload = json.RawMessage(payloadBytes)
+		if meta.Valid {
+			m, err := decodeStringMap(meta.String)
+			if err != nil {
+				return nil, fmt.Errorf("ledger/sqlite: search metadata: %w", err)
+			}
+			e.Metadata = m
+		}
+		if err := json.Unmarshal([]byte(tagsJSON), &e.Tags); err != nil {
+			return nil, fmt.Errorf("ledger/sqlite: search tags: %w", err)
+		}
+		if annotations.Valid {
+			m, err := decodeStringMap(annotations.String)
+			if err != nil {
+				return nil, fmt.Errorf("ledger/sqlite: search annotations: %w", err)
+			}
+			e.Annotations = m
+		}
+		t, err := time.Parse("2006-01-02T15:04:05.000", createdAt)
+		if err != nil {
+			return nil, fmt.Errorf("ledger/sqlite: search created_at: %w", err)
+		}
+		e.CreatedAt = t
+		if updatedAt.Valid {
+			ut, err := time.Parse("2006-01-02T15:04:05.000", updatedAt.String)
+			if err != nil {
+				return nil, fmt.Errorf("ledger/sqlite: search updated_at: %w", err)
+			}
+			e.UpdatedAt = &ut
+		}
+		entries = append(entries, e)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("ledger/sqlite: search rows: %w", err)
+	}
+	return entries, nil
 }
 
 // SetTags replaces all tags on an entry.

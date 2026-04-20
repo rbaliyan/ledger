@@ -25,6 +25,10 @@ func (mockStore) Read(_ context.Context, _ string, _ ...ledger.ReadOption) ([]le
 
 func (mockStore) Count(_ context.Context, _ string) (int64, error) { return 0, nil }
 
+func (mockStore) Stat(_ context.Context, _ string) (ledger.StreamStat[int64], error) {
+	return ledger.StreamStat[int64]{}, nil
+}
+
 func (mockStore) SetTags(_ context.Context, _ string, _ int64, _ []string) error { return nil }
 
 func (mockStore) SetAnnotations(_ context.Context, _ string, _ int64, _ map[string]*string) error {

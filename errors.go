@@ -30,4 +30,10 @@ var (
 	// ErrNotSupported is returned when an operation is not supported by the backend.
 	// ClickHouse and other append-only backends return this for SetTags and SetAnnotations.
 	ErrNotSupported = errors.New("ledger: operation not supported by this backend")
+
+	// ErrStreamNotFound is returned when a named stream does not exist in the metadata store.
+	ErrStreamNotFound = errors.New("ledger: stream not found")
+
+	// ErrStreamExists is returned when a rename target name already exists in the metadata store.
+	ErrStreamExists = errors.New("ledger: stream already exists")
 )

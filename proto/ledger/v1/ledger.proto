@@ -8,8 +8,10 @@ option go_package = "github.com/rbaliyan/ledger/api/ledger/v1;ledgerv1";
 
 // LedgerService exposes the append-only log operations over gRPC.
 //
-// A server instance is bound to exactly one store (table / collection).
-// Within that store, streams are identified by the "stream" field in each request.
+// Every request must carry the "x-ledger-store" gRPC metadata header, which
+// selects the target store (table / collection). The server routes each call
+// to the appropriate backend based on this header. Within a store, individual
+// log instances are identified by the "stream" field in each request.
 service LedgerService {
   // Append adds entries to the named stream.
   // Entries whose DedupKey already exists in the stream are silently skipped.
@@ -40,6 +42,17 @@ service LedgerService {
   // Streams that have been fully trimmed are not returned.
   // Results are ascending by stream ID and cursor-paginated via after / limit.
   rpc ListStreamIDs(ListStreamIDsRequest) returns (ListStreamIDsResponse);
+
+  // RenameStream changes the human-readable name of a stream without touching
+  // its entries. Returns NOT_FOUND if the current name does not exist.
+  rpc RenameStream(RenameStreamRequest) returns (RenameStreamResponse);
+
+  // Stat returns metrics for a stream, including entry count and first/last entry IDs.
+  rpc Stat(StatRequest) returns (StatResponse);
+
+  // Search performs a substring / full-text search on entry payloads.
+  // Returns UNIMPLEMENTED if the backend does not support search.
+  rpc Search(SearchRequest) returns (SearchResponse);
 
   // Health reports backend connectivity. Returns status "ok" on success,
   // or a description of the problem on failure.
@@ -75,8 +88,9 @@ message EntryInput {
 
 // Entry is a stored ledger entry returned by Read.
 message Entry {
-  // id is the store-assigned unique identifier (decimal int64 for SQL backends,
-  // hex ObjectID string for MongoDB).
+  // id is the store-assigned unique identifier. The format depends on the
+  // backend: decimal int64 string for SQLite/PostgreSQL, MongoDB ObjectID
+  // hex string, or a 32-char time-ordered hex string for ClickHouse.
   string id = 1;
 
   // stream is the stream this entry belongs to.
@@ -232,6 +246,49 @@ message ListStreamIDsRequest {
 message ListStreamIDsResponse {
   // stream_ids is the ordered list of distinct stream IDs with at least one entry.
   repeated string stream_ids = 1;
+}
+
+// ─── RenameStream ─────────────────────────────────────────────────────────────
+
+message RenameStreamRequest {
+  // name is the current human-readable stream name.
+  string name = 1;
+
+  // new_name is the desired new name for the stream.
+  string new_name = 2;
+}
+
+message RenameStreamResponse {}
+
+// ─── Stat ────────────────────────────────────────────────────────────────────
+
+message StatRequest {
+  string stream = 1;
+}
+
+message StatResponse {
+  string stream = 1;
+  int64 count = 2;
+  string first_id = 3;
+  string last_id = 4;
+}
+
+// ─── Search ──────────────────────────────────────────────────────────────────
+
+message SearchRequest {
+  // stream is the stream to search within. Empty searches all streams in the store.
+  string stream = 1;
+
+  // query is the search term. Syntax depends on the backend
+  // (substring LIKE for SQLite/PostgreSQL, $text for MongoDB).
+  string query = 2;
+
+  // options controls pagination and ordering of results.
+  ReadOptions options = 3;
+}
+
+message SearchResponse {
+  repeated Entry entries = 1;
 }
 
 // ─── Health ──────────────────────────────────────────────────────────────────
