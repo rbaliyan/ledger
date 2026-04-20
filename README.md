@@ -7,39 +7,37 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/rbaliyan/ledger/badge)](https://scorecard.dev/viewer/?uri=github.com/rbaliyan/ledger)
 
-Append-only log library for Go with typed generic entries, schema versioning, and pluggable storage backends.
+**ledger** is a high-performance, append-only log library for Go featuring typed generic streams, schema versioning, and pluggable storage backends. It also includes a standalone daemon with a gRPC API and a rich CLI for stream management.
 
-## Model
+## Key Features
 
-A **Store** represents one entity type — one table or collection. Create it with a name describing the type (e.g., `"orders"`, `"audit_events"`). All streams in that store share the same schema and codec.
+- Multiple Backends — Native support for SQLite, PostgreSQL, MongoDB, and ClickHouse.
+- Type Safety — Generic `Stream[I, T]` ensures compile-time safety for your entry payloads.
+- Lightweight Streams — Create thousands of streams dynamically without configuration or lifecycle management.
+- Schema Versioning — Built-in `Upcaster` and `FieldMapper` to evolve your data models safely over time.
+- Pluggable Architecture — Easily implement custom backends or codecs (JSON, Protobuf, MsgPack).
+- CLI & Daemon — Use it as a library in your Go apps or run it as a standalone service with the `ledger` CLI.
+- Observability — First-class OpenTelemetry support for Traces and Metrics.
+- Replication Bridge — Replicate mutations between different stores (e.g., Postgres to ClickHouse).
+- Advanced Querying — Cursor-based pagination, ordering keys, and mutable tags/annotations for filtering.
 
-A **Stream** is an instance within a type. Create it with a stream ID (e.g., `"user-123"`, `"org-456"`). Streams are implicit — they're created on first append and require no setup.
+---
 
-Use `store.ListStreamIDs(ctx)` to enumerate all streams of the type.
+## Core Concept: Store = type, Stream = instance
 
-## Features
+A **Store** maps to one table (SQL) or collection (MongoDB) and represents a single entity type (e.g., `orders`, `events`). A **Stream** is one instance within that type, identified by a string ID (e.g., `"user-123"`). Streams are implicit — they come into existence on first append and require no lifecycle management.
 
-- **Generic typed streams** — `Stream[I, T]` provides compile-time type safety for entry payloads
-- **Lightweight streams** — create per operation and discard, no lifecycle management
-- **Stream discovery** — `ListStreamIDs` enumerates all streams in a store
-- **Schema versioning** — entries are stamped with a version; upcasters transform old entries on read
-- **Deduplication** — storage-level dedup via partial unique indexes, silently skips duplicates
-- **Ordering keys** — filter entries by an ordering key (e.g., aggregate ID)
-- **Mutable tags & annotations** — update labels and key-value state on existing entries; filter reads by tag
-- **Cursor-based pagination** — efficient reads with `After(id)`, `Limit(n)`, `Desc()`
-- **Retention management** — `Trim(ctx, stream, beforeID)` for log compaction
-- **External transactions** — participate in a caller-managed `*sql.Tx` or `mongo.Session` via `WithTx(ctx, tx)`
-- **Health checks** — all backends implement `HealthChecker` interface
-- **Structured logging** — all backends log via `slog.Default()`; override with `WithLogger()`
-- **Three backends** — SQLite, PostgreSQL, MongoDB
+```go
+// One store per entity type
+ordersStore, _ := sqlite.New(ctx, db, sqlite.WithTable("orders"))
 
-## Installation
-
-```bash
-go get github.com/rbaliyan/ledger
+// One stream per instance — create on demand, discard after use
+s, _ := ledger.NewStream(ordersStore, "user-123", ledger.JSONCodec[Order]{})
 ```
 
-## Quick Start
+---
+
+## Library Quick Start
 
 ```go
 package main
@@ -61,65 +59,135 @@ type Order struct {
 
 func main() {
     ctx := context.Background()
-
-    // Open the database once.
     db, _ := sql.Open("sqlite", "app.db")
 
-    // Open one store per entity type. The table name IS the type.
-    orders, _ := sqlite.New(ctx, db, sqlite.WithTable("orders"))
-    defer orders.Close(ctx)
+    // Open a store (maps to a table)
+    ordersStore, _ := sqlite.New(ctx, db, sqlite.WithTable("orders"))
+    defer ordersStore.Close(ctx)
 
-    // Create a lightweight stream for one instance ("user-123") of the orders type.
-    s := ledger.NewStream[int64, Order](orders, "user-123")
+    // Create a typed stream for a specific user — codec is required
+    s, err := ledger.NewStream(ordersStore, "user-123", ledger.JSONCodec[Order]{})
+    if err != nil {
+        panic(err)
+    }
 
-    // Append entries with ordering key, dedup key, and metadata
+    // Append an entry
     ids, _ := s.Append(ctx, ledger.AppendInput[Order]{
         Payload:  Order{ID: "o-1", Amount: 99.99},
         OrderKey: "customer-123",
-        DedupKey: "evt-abc",
-        Metadata: map[string]string{"source": "api"},
+        Tags:     []string{"pending"},
     })
-    fmt.Println("appended", len(ids), "entries")
+    fmt.Printf("Appended entry ID: %v\n", ids[0])
 
-    // Read entries (default limit is 100)
-    entries, _ := s.Read(ctx)
-
-    // Continue from where you left off
-    if len(entries) > 0 {
-        more, _ := s.Read(ctx, ledger.After(entries[len(entries)-1].ID), ledger.Limit(50))
-        _ = more
-    }
-
-    // Filter by ordering key
-    byCustomer, _ := s.Read(ctx, ledger.WithOrderKey("customer-123"))
-    _ = byCustomer
-
-    // Enumerate every order stream in this store.
-    streamIDs, _ := orders.ListStreamIDs(ctx)
-    for _, id := range streamIDs {
-        // Load each stream and process.
-        _ = ledger.NewStream[int64, Order](orders, id)
+    // Read entries
+    entries, _ := s.Read(ctx, ledger.Limit(10))
+    for _, e := range entries {
+        fmt.Printf("[%d] Order: %s, Amount: %.2f\n", e.ID, e.Payload.ID, e.Payload.Amount)
     }
 }
 ```
 
-### Multiple types
+---
 
-Each type is a separate store, typically backed by a separate table or collection:
+## CLI & Daemon
 
-```go
-orders, _ := sqlite.New(ctx, db, sqlite.WithTable("orders"))
-users,  _ := sqlite.New(ctx, db, sqlite.WithTable("users"))
+The `ledger` CLI can run as a background daemon (SQLite or PostgreSQL) and provides subcommands for all stream operations.
 
-// Streams within a store are independent of streams in other stores —
-// `"alice"` under `orders` and `"alice"` under `users` are separate.
-ordStream  := ledger.NewStream[int64, Order](orders, "alice")
-userStream := ledger.NewStream[int64, User](users,  "alice")
+### Installation
+
+```bash
+go install github.com/rbaliyan/ledger/cmd/ledger@latest
 ```
 
-## Schema Versioning
+### Running the Daemon
 
-When your payload type evolves, register upcasters to transform old entries on read:
+```bash
+# Start in the background — creates ~/.ledger/config.yaml and ~/.ledger/ledger.db on first run
+ledger start
+
+# Start in the foreground with an explicit config file
+ledger start --foreground --config /etc/ledger/config.yaml
+
+# Check status
+ledger status
+
+# Stop
+ledger stop
+```
+
+On first run, `ledger start` creates `~/.ledger/config.yaml` (fully annotated) and
+`~/.ledger/ledger.db` (SQLite) and listens on `localhost:50051`.
+
+**API key protection** — set `api_key` in `config.yaml` and pass `--api-key <key>` on
+every CLI call (or set it in the config file used by the client).
+
+**TLS** — set `tls.cert`, `tls.key`, and optionally `tls.ca` (mutual TLS) in the
+config. Pass the same paths with `--config` on the client side.
+
+### Stream Subcommands
+
+All stream subcommands accept `--store` (table/collection name, default `ledger_entries`)
+and `--stream` (stream ID within the store, default `default`).
+
+```bash
+# Append entries
+ledger stream append "plain text message"
+ledger stream append --json '{"event":"login","user":"alice"}'
+ledger stream append --stream orders --json '{"amount":42}' --tag pending --meta env=prod
+
+# Read entries (plain text by default; --json for full entry JSON)
+ledger stream read --stream orders
+ledger stream read --stream orders --desc --limit 20 --tag pending
+ledger stream read --stream orders --after 42 --order-key customer-1
+
+# Search payloads (substring match; SQLite and PostgreSQL only via daemon)
+ledger stream search "login"
+ledger stream search --stream orders "failed"
+
+# Count entries
+ledger stream count --stream orders
+
+# Stream list and stats
+ledger stream list
+ledger stream stat --stream orders
+
+# Mutable tags and annotations
+ledger stream tag   --stream orders --id 7 --tag shipped --tag paid
+ledger stream annotate --stream orders --id 7 --set tracking=1Z999 --set carrier=UPS
+ledger stream annotate --stream orders --id 7 --set tracking=   # delete key
+
+# Rename a stream (metadata-only; entries are unchanged)
+ledger stream rename --stream orders --to fulfilled-orders
+
+# Trim old entries
+ledger stream trim --stream orders --before 100
+
+# Tail (continuous polling)
+ledger stream tail --stream orders --interval 1s
+```
+
+---
+
+## Backend Support Matrix
+
+| Backend | Go Library | CLI / Daemon | Search | Atomicity |
+| :--- | :---: | :---: | :---: | :--- |
+| **SQLite** | Yes | Yes | Yes | Transactional |
+| **PostgreSQL** | Yes | Yes | Yes | Transactional |
+| **MongoDB** | Yes | No | Yes | Batch (Partial) |
+| **ClickHouse** | Yes | No | No | Append-only (Async Trim) |
+
+MongoDB and ClickHouse are library-only backends; the daemon (`ledger start`) supports
+only SQLite and PostgreSQL. Use the Go library directly to write to MongoDB or ClickHouse.
+
+---
+
+## Advanced Features
+
+### Schema Evolution
+
+Upcasters transparently migrate old entries when they are read back, without touching
+stored data:
 
 ```go
 type OrderV2 struct {
@@ -128,190 +196,59 @@ type OrderV2 struct {
     Amount float64 `json:"amount"`
 }
 
-s := ledger.NewStream[int64, OrderV2](store, "orders",
-    ledger.WithSchemaVersion(2),
+s, err := ledger.NewStream(store, "orders", ledger.JSONCodec[OrderV2]{},
+    ledger.WithSchemaVersion[json.RawMessage](2),
     ledger.WithUpcaster(ledger.NewFieldMapper(1, 2).
         RenameField("customer_name", "name").
         AddDefault("email", "unknown@example.com")),
 )
-
-// Old v1 entries are automatically upcasted to v2 before decoding
-entries, _ := s.Read(ctx)
 ```
 
-## Custom Codec
+### OpenTelemetry Instrumentation
 
-Payloads are encoded with JSON by default. Provide a custom `Codec` implementation
-for alternative formats (protobuf, msgpack, etc.):
+Enable tracing and metrics by wrapping your store:
 
 ```go
-s := ledger.NewStream[int64, Order](store, "orders",
-    ledger.WithCodec(myProtobufCodec{}),
+import "github.com/rbaliyan/ledger/otel"
+
+instrumentedStore, _ := otel.WrapStore(baseStore,
+    otel.WithTracesEnabled(true),
+    otel.WithMetricsEnabled(true),
 )
 ```
 
-## Backends
+### Replication Bridge
 
-### SQLite
+The `bridge` package replicates mutations from one store to another — useful for CDC
+(Change Data Capture) or syncing operational data into an analytics backend:
 
 ```go
-import "github.com/rbaliyan/ledger/sqlite"
+import "github.com/rbaliyan/ledger/bridge"
 
-// db is a *sql.DB opened with a SQLite driver (e.g., modernc.org/sqlite)
-store, err := sqlite.New(ctx, db,
-    sqlite.WithTable("my_ledger"),
-    sqlite.WithLogger(slog.Default()),
+// mutations is the source mutation log store (opened against the same DB as the source).
+// sink is the ClickHouse (or other) destination store.
+// bridge.Int64Codec{} encodes the source int64 IDs for cursor storage.
+b, err := bridge.New(mutations, sinkStore, bridge.Int64Codec{},
+    bridge.WithSkipMutationTypes(bridge.MutationSetTags, bridge.MutationSetAnnotations),
 )
-```
-
-### PostgreSQL
-
-```go
-import "github.com/rbaliyan/ledger/postgres"
-
-// db is a *sql.DB opened with a PostgreSQL driver (e.g., github.com/lib/pq)
-store, err := postgres.New(ctx, db,
-    postgres.WithTable("my_ledger"),
-)
-```
-
-### MongoDB
-
-```go
-import "github.com/rbaliyan/ledger/mongodb"
-
-// db is a *mongo.Database from an already-connected mongo.Client
-store, err := mongodb.New(ctx, db,
-    mongodb.WithCollection("my_ledger"),
-)
-```
-
-**Atomicity note:** SQL backends (sqlite, postgres) use transactions for atomic batch inserts. MongoDB uses `InsertMany` with `ordered:false` — partial success is possible on non-dedup errors.
-
-## Store Interface
-
-```go
-type Store[I comparable] interface {
-    Append(ctx context.Context, stream string, entries ...RawEntry) ([]I, error)
-    Read(ctx context.Context, stream string, opts ...ReadOption) ([]StoredEntry[I], error)
-    Count(ctx context.Context, stream string) (int64, error)
-    SetTags(ctx context.Context, stream string, id I, tags []string) error
-    SetAnnotations(ctx context.Context, stream string, id I, ann map[string]*string) error
-    Trim(ctx context.Context, stream string, beforeID I) (int64, error)
-    ListStreamIDs(ctx context.Context, opts ...ListOption) ([]string, error)
-    Close(ctx context.Context) error
+if err != nil {
+    panic(err)
 }
+b.Start(ctx)
 ```
 
-ID types: `int64` for SQLite/PostgreSQL, `string` (hex ObjectID) for MongoDB.
+---
 
-Read defaults to ascending order with a limit of 100.
-
-## Deduplication
-
-Entries with a non-empty `DedupKey` are subject to per-stream dedup via a partial unique index. Duplicates are silently skipped. Empty `DedupKey` means no dedup — the entry is always appended.
-
-## Metadata
-
-Attach arbitrary **immutable** key-value metadata at append time:
-
-```go
-s.Append(ctx, ledger.AppendInput[Order]{
-    Payload:  order,
-    Metadata: map[string]string{"trace_id": "abc123", "source": "api"},
-})
-```
-
-Metadata is stored as JSON (SQL backends) or a BSON subdocument (MongoDB) and never changes after append.
-
-## Tags and Annotations
-
-Entries have two **mutable** fields that can be updated after append:
-
-- **Tags** `[]string` — ordered labels for categorization and filtering (e.g., `"processed"`, `"archived"`).
-- **Annotations** `map[string]string` — key-value state separate from immutable `Metadata` (e.g., `"processed_at"`, `"error"`).
-
-```go
-// Initial tags can be set at append time.
-ids, _ := s.Append(ctx, ledger.AppendInput[Order]{
-    Payload: order,
-    Tags:    []string{"pending"},
-})
-id := ids[0]
-
-// Replace tags on an existing entry.
-store.SetTags(ctx, "user-123", id, []string{"processed", "reviewed"})
-
-// Merge annotations. A nil value deletes that key.
-v := "2026-04-13"
-store.SetAnnotations(ctx, "user-123", id, map[string]*string{
-    "processed_at": &v,
-    "error":        nil,
-})
-```
-
-Filter reads by tag:
-
-```go
-// Entries carrying this tag:
-entries, _ := s.Read(ctx, ledger.WithTag("processed"))
-
-// Entries carrying ALL of these tags:
-entries, _ = s.Read(ctx, ledger.WithAllTags("processed", "audited"))
-```
-
-`SetTags` and `SetAnnotations` return `ErrEntryNotFound` when the entry doesn't exist in the stream.
-
-## Transactions
-
-Participate in a caller-managed transaction by attaching it to the context. Store methods invoked with that context use the caller's transaction instead of creating their own:
-
-```go
-// SQL (sqlite, postgres)
-tx, _ := db.BeginTx(ctx, nil)
-ctx = ledger.WithTx(ctx, tx)
-store.Append(ctx, "user-123", entry) // participates in tx
-tx.Commit()
-
-// MongoDB
-sess, _ := client.StartSession()
-sess.WithTransaction(ctx, func(sc context.Context) (any, error) {
-    ctx := ledger.WithTx(sc, sess)
-    _, err := store.Append(ctx, "user-123", entry)
-    return nil, err
-})
-```
-
-Without `WithTx`, SQL backends open their own transaction per batch `Append`; MongoDB uses `InsertMany` with `ordered:false` (see Atomicity note above).
-
-## Custom Backends
-
-Implement the `Store[I]` interface and validate with the conformance test suite:
-
-```go
-import "github.com/rbaliyan/ledger/storetest"
-
-func TestConformance(t *testing.T) {
-    store := myBackend.New(ctx, db)
-    storetest.RunStoreTests(t, store, ledger.After[int64])
-}
-```
-
-## Testing
+## Development & Testing
 
 ```bash
-# Unit tests (SQLite only, no external deps)
+# Run unit tests
 go test ./...
 
-# Integration tests (requires Docker)
+# Run integration tests (requires Docker)
 just test-integration
 
-# Individual backends
-just test-sqlite
-just test-pg
-just test-mongo
-
-# Benchmarks
+# Run benchmarks
 just bench
 ```
 
