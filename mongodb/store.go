@@ -137,7 +137,7 @@ func New(ctx context.Context, db *mongo.Database, opts ...Option) (*Store, error
 	if err := s.ensureIndexes(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/mongodb: ensure indexes: %w", err)
 	}
-	go s.createAsyncIndexes(o.logger)
+	go s.createAsyncIndexes(o.logger) // #nosec G118 -- background index creation intentionally outlives request context
 	return s, nil
 }
 

@@ -76,7 +76,7 @@ func New(ctx context.Context, cfg *config.Config) (*Server, error) {
 		h, err := newHookRunner(hcfg, mux)
 		if err != nil {
 			hookCancel()
-			ln.Close()
+			_ = ln.Close()
 			mux.Close(ctx)
 			return nil, fmt.Errorf("server: hook: %w", err)
 		}

@@ -44,7 +44,7 @@ func NewZstdCodec[T any]() (CloseableCodec[T, json.RawMessage], error) {
 	}
 	dec, err := newZstdDecoder()
 	if err != nil {
-		enc.Close()
+		_ = enc.Close()
 		return nil, fmt.Errorf("ledger/zstd: create decoder: %w", err)
 	}
 	return &zstdCodec[T]{enc: enc, dec: dec}, nil
@@ -59,7 +59,7 @@ func NewZstdCodecLevel[T any](level zstd.EncoderLevel) (CloseableCodec[T, json.R
 	}
 	dec, err := newZstdDecoder()
 	if err != nil {
-		enc.Close()
+		_ = enc.Close()
 		return nil, fmt.Errorf("ledger/zstd: create decoder: %w", err)
 	}
 	return &zstdCodec[T]{enc: enc, dec: dec}, nil
@@ -76,7 +76,7 @@ func newZstdDecoder() (*zstd.Decoder, error) {
 
 // Close releases internal encoder and decoder resources.
 func (c *zstdCodec[T]) Close() {
-	c.enc.Close()
+	_ = c.enc.Close()
 	c.dec.Close()
 }
 

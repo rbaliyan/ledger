@@ -594,7 +594,7 @@ func tailStream(
 				// Exponential back-off with jitter to avoid thundering-herd when
 				// all tail clients reconnect at the same time after a daemon restart.
 				backoff = min(backoff*2, 30*time.Second)
-				jitter := time.Duration(rand.N(1000)) * time.Millisecond
+				jitter := time.Duration(rand.N(1000)) * time.Millisecond // #nosec G404 -- non-security jitter
 				ticker.Reset(backoff + jitter)
 				continue
 			}
