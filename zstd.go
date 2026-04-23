@@ -86,11 +86,8 @@ func (c *zstdCodec[T]) Marshal(v T) (json.RawMessage, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: json marshal: %v", ErrEncode, err)
 	}
-	compressed := c.enc.EncodeAll(raw, make([]byte, 0, 1+len(raw)/2))
-	out := make([]byte, 1+len(compressed))
-	out[0] = zstdVersionByte
-	copy(out[1:], compressed)
-	return json.RawMessage(out), nil
+	compressed := c.enc.EncodeAll(raw, nil)
+	return json.RawMessage(append([]byte{zstdVersionByte}, compressed...)), nil
 }
 
 // Unmarshal decodes a payload produced by either [NewZstdCodec] or [JSONCodec].
