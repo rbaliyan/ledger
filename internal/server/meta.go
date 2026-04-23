@@ -10,31 +10,33 @@ import (
 	"github.com/rbaliyan/ledger"
 )
 
-// streamMetaStore maps human-readable stream names to internal UUIDs.
-// A single table (ledger_stream_metadata) is shared across all stores; the
-// store_name column provides per-store namespacing.
-type streamMetaStore struct {
+// metaStore maps human-readable stream names to internal UUIDs.
+// Each driver supplies an implementation via [DriverResources.Meta] so that
+// metadata and entries live in the same database — no sidecar required.
+type metaStore interface {
+	resolve(ctx context.Context, storeName, name string) (string, bool, error)
+	resolveOrCreate(ctx context.Context, storeName, name string) (string, error)
+	rename(ctx context.Context, storeName, oldName, newName string) error
+	listNames(ctx context.Context, storeName, after string, limit int) ([]string, error)
+}
+
+// sqlMetaStore implements metaStore for SQL backends (sqlite, postgres).
+// A single shared table (ledger_stream_metadata) is used across all stores;
+// the store_name column provides per-store namespacing.
+type sqlMetaStore struct {
 	db     *sql.DB
 	driver string // "sqlite" or "postgres"
 }
 
-// supportedMetaDrivers enumerates database drivers the metadata store knows
-// how to dialect-specialise. Backends outside this set cannot be used with the
-// daemon mux today.
-var supportedMetaDrivers = map[string]bool{
-	"sqlite":   true,
-	"postgres": true,
-}
-
-func newStreamMetaStore(ctx context.Context, db *sql.DB, driver string) (*streamMetaStore, error) {
-	if !supportedMetaDrivers[driver] {
-		return nil, fmt.Errorf("server: stream metadata driver %q not supported", driver)
+func newSQLMetaStore(ctx context.Context, db *sql.DB, driver string) (*sqlMetaStore, error) {
+	if driver != "sqlite" && driver != "postgres" {
+		return nil, fmt.Errorf("server: sql meta store: unsupported driver %q", driver)
 	}
-	m := &streamMetaStore{db: db, driver: driver}
+	m := &sqlMetaStore{db: db, driver: driver}
 	return m, m.init(ctx)
 }
 
-func (m *streamMetaStore) init(ctx context.Context) error {
+func (m *sqlMetaStore) init(ctx context.Context) error {
 	_, err := m.db.ExecContext(ctx, `
 		CREATE TABLE IF NOT EXISTS ledger_stream_metadata (
 			store_name TEXT      NOT NULL,
@@ -49,9 +51,9 @@ func (m *streamMetaStore) init(ctx context.Context) error {
 }
 
 // resolve returns the internal UUID for name. Returns ("", false, nil) when
-// the stream does not exist in the metadata table. Used for read-only
-// operations that must not create phantom streams.
-func (m *streamMetaStore) resolve(ctx context.Context, storeName, name string) (string, bool, error) {
+// the stream does not exist. Used for read-only operations that must not
+// create phantom streams.
+func (m *sqlMetaStore) resolve(ctx context.Context, storeName, name string) (string, bool, error) {
 	var q string
 	if m.driver == "postgres" {
 		q = `SELECT stream_id FROM ledger_stream_metadata WHERE store_name=$1 AND name=$2`
@@ -69,10 +71,9 @@ func (m *streamMetaStore) resolve(ctx context.Context, storeName, name string) (
 	return id, true, nil
 }
 
-// resolveOrCreate returns the internal UUID for the given human-readable name,
-// creating a new mapping when one does not exist. Used only by Append.
-func (m *streamMetaStore) resolveOrCreate(ctx context.Context, storeName, name string) (string, error) {
-	// Fast path: existing mapping.
+// resolveOrCreate returns the internal UUID for name, creating a mapping when
+// one does not exist. Used only by Append.
+func (m *sqlMetaStore) resolveOrCreate(ctx context.Context, storeName, name string) (string, error) {
 	if id, ok, err := m.resolve(ctx, storeName, name); err != nil {
 		return "", err
 	} else if ok {
@@ -106,7 +107,7 @@ func (m *streamMetaStore) resolveOrCreate(ctx context.Context, storeName, name s
 // rename changes the human-readable name of an existing stream within a store.
 // Returns [ledger.ErrStreamNotFound] when oldName does not exist, and
 // [ledger.ErrStreamExists] when newName is already in use.
-func (m *streamMetaStore) rename(ctx context.Context, storeName, oldName, newName string) error {
+func (m *sqlMetaStore) rename(ctx context.Context, storeName, oldName, newName string) error {
 	if oldName == newName {
 		return nil
 	}
@@ -136,7 +137,7 @@ func (m *streamMetaStore) rename(ctx context.Context, storeName, oldName, newNam
 }
 
 // listNames returns paginated human-readable stream names for a store.
-func (m *streamMetaStore) listNames(ctx context.Context, storeName, after string, limit int) ([]string, error) {
+func (m *sqlMetaStore) listNames(ctx context.Context, storeName, after string, limit int) ([]string, error) {
 	if limit <= 0 {
 		limit = 100
 	}

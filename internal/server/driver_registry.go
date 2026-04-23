@@ -18,7 +18,7 @@ type ProviderFactory func(ctx context.Context, name string) (ledgerpb.Provider, 
 // DriverResources holds the resources opened by a [Driver].
 // The caller is responsible for calling Closer.Close when done.
 type DriverResources struct {
-	Meta    *streamMetaStore
+	Meta    metaStore
 	Factory ProviderFactory
 	Closer  io.Closer
 }

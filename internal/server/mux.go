@@ -26,7 +26,7 @@ var (
 // internal UUIDs via the metadata store. Backends are lazily created and cached.
 type muxProvider struct {
 	factory  ProviderFactory
-	meta     *streamMetaStore
+	meta     metaStore
 	mu       sync.RWMutex
 	backends map[string]ledgerpb.Provider
 	closed   bool
@@ -34,7 +34,7 @@ type muxProvider struct {
 
 // newMuxProvider returns a muxProvider that creates backends using factory and
 // resolves stream names via meta.
-func newMuxProvider(factory ProviderFactory, meta *streamMetaStore) *muxProvider {
+func newMuxProvider(factory ProviderFactory, meta metaStore) *muxProvider {
 	return &muxProvider{
 		factory:  factory,
 		meta:     meta,
@@ -286,6 +286,13 @@ func (m *muxProvider) Search(ctx context.Context, stream string, query string, o
 		entries[i].Stream = stream
 	}
 	return entries, nil
+}
+
+// providerFor returns the Provider for storeName, creating it if necessary.
+// Unlike the gRPC path, it does not read the store name from context metadata.
+// Used by the hook runner.
+func (m *muxProvider) providerFor(ctx context.Context, storeName string) (ledgerpb.Provider, error) {
+	return m.getOrCreateBackend(ctx, storeName)
 }
 
 func (m *muxProvider) Health(ctx context.Context) error {

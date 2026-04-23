@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -22,6 +23,20 @@ type UsageError struct{ err error }
 func (e UsageError) Error() string { return e.err.Error() }
 func (e UsageError) Unwrap() error { return e.err }
 
+// appendOnlyOpError returns a descriptive error when the backend does not
+// support a mutation operation. Converts gRPC Unimplemented errors into a
+// clearer message that names the specific operation.
+func appendOnlyOpError(op string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if status.Code(err) == codes.Unimplemented {
+		return fmt.Errorf("%q is not supported by the configured backend\n"+
+			"(mutation operations are unavailable on append-only stores such as ClickHouse)", op)
+	}
+	return err
+}
+
 // usageErrorf prints "Error: <msg>" followed by the command usage, then
 // returns a UsageError so main.go does not print the message a second time.
 func usageErrorf(cmd *cobra.Command, format string, args ...any) error {
@@ -29,6 +44,21 @@ func usageErrorf(cmd *cobra.Command, format string, args ...any) error {
 	_, _ = fmt.Fprintf(cmd.ErrOrStderr(), "Error: %s\n\n", err)
 	_ = cmd.Usage()
 	return UsageError{err: err}
+}
+
+// addStoreFlag adds the common --store / -s flag to cmd.
+func addStoreFlag(cmd *cobra.Command, store *string) {
+	cmd.Flags().StringVarP(store, "store", "s", "ledger_entries", "store (table/collection) name")
+}
+
+// addStreamFlag adds the common --stream / -S flag to cmd with the given default.
+func addStreamFlag(cmd *cobra.Command, stream *string, defaultVal string) {
+	cmd.Flags().StringVarP(stream, "stream", "S", defaultVal, "stream ID")
+}
+
+// addLimitFlag adds the common --limit flag to cmd with the given default.
+func addLimitFlag(cmd *cobra.Command, limit *int64, defaultVal int64) {
+	cmd.Flags().Int64Var(limit, "limit", defaultVal, "max entries (0 = server default)")
 }
 
 func newStreamCmd() *cobra.Command {
@@ -86,9 +116,9 @@ func newStreamListCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
+	addStoreFlag(cmd, &store)
 	cmd.Flags().StringVar(&after, "after", "", "cursor: list stream IDs after this value")
-	cmd.Flags().Int64Var(&limit, "limit", 0, "max results (0 = server default)")
+	addLimitFlag(cmd, &limit, 0)
 	return cmd
 }
 
@@ -164,8 +194,8 @@ Examples:
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
+	addStoreFlag(cmd, &store)
+	addStreamFlag(cmd, &stream, "default")
 	cmd.Flags().BoolVar(&jsonMode, "json", false, "treat payload as a raw JSON value instead of plain text")
 	cmd.Flags().StringVar(&orderKey, "order-key", "", "ordering key")
 	cmd.Flags().StringVar(&dedupKey, "dedup-key", "", "deduplication key")
@@ -216,11 +246,11 @@ prefixed with its ID). Pass --json to print the full entry as JSON instead.`,
 			return printEntries(cmd.OutOrStdout(), resp.Entries, jsonMode)
 		},
 	}
-	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
+	addStoreFlag(cmd, &store)
+	addStreamFlag(cmd, &stream, "default")
 	cmd.Flags().BoolVar(&jsonMode, "json", false, "print full JSON entry instead of plain text payload")
 	cmd.Flags().StringVar(&after, "after", "", "cursor: only entries after this ID")
-	cmd.Flags().Int64Var(&limit, "limit", 0, "max entries (0 = server default)")
+	addLimitFlag(cmd, &limit, 0)
 	cmd.Flags().BoolVar(&desc, "desc", false, "newest first")
 	cmd.Flags().StringVar(&orderKey, "order-key", "", "filter by order key")
 	cmd.Flags().StringVar(&tag, "tag", "", "filter by tag")
@@ -274,10 +304,10 @@ Examples:
 			return printEntries(cmd.OutOrStdout(), resp.Entries, jsonMode)
 		},
 	}
-	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "", "stream to search (empty = all streams)")
+	addStoreFlag(cmd, &store)
+	addStreamFlag(cmd, &stream, "")
 	cmd.Flags().BoolVar(&jsonMode, "json", false, "print full JSON entry instead of plain text payload")
-	cmd.Flags().Int64Var(&limit, "limit", 0, "max results (0 = server default)")
+	addLimitFlag(cmd, &limit, 0)
 	cmd.Flags().BoolVar(&desc, "desc", false, "newest first")
 	return cmd
 }
@@ -310,8 +340,8 @@ func newStreamCountCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
+	addStoreFlag(cmd, &store)
+	addStreamFlag(cmd, &stream, "default")
 	return cmd
 }
 
@@ -344,11 +374,11 @@ func newStreamTagCmd() *cobra.Command {
 				Id:     entryID,
 				Tags:   tags,
 			})
-			return err
+			return appendOnlyOpError("SetTags", err)
 		},
 	}
-	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
+	addStoreFlag(cmd, &store)
+	addStreamFlag(cmd, &stream, "default")
 	cmd.Flags().StringVar(&entryID, "id", "", "entry ID (required)")
 	cmd.Flags().StringArrayVarP(&tags, "tag", "t", nil, "tags (repeatable; replaces all existing tags)")
 	return cmd
@@ -398,11 +428,11 @@ func newStreamAnnotateCmd() *cobra.Command {
 				Set:    set,
 				Delete: del,
 			})
-			return err
+			return appendOnlyOpError("SetAnnotations", err)
 		},
 	}
-	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
+	addStoreFlag(cmd, &store)
+	addStreamFlag(cmd, &stream, "default")
 	cmd.Flags().StringVar(&entryID, "id", "", "entry ID (required)")
 	cmd.Flags().StringArrayVar(&pairs, "set", nil, "annotation key=value to set; key= to delete (repeatable)")
 	return cmd
@@ -442,8 +472,8 @@ func newStreamTrimCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
+	addStoreFlag(cmd, &store)
+	addStreamFlag(cmd, &stream, "default")
 	cmd.Flags().StringVar(&beforeID, "before", "", "trim entries with ID <= this value (required)")
 	return cmd
 }
@@ -474,11 +504,11 @@ func newStreamTailCmd() *cobra.Command {
 			return tailStream(ctx, cmd.OutOrStdout(), client, stream, limit, interval, jsonMode)
 		},
 	}
-	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
+	addStoreFlag(cmd, &store)
+	addStreamFlag(cmd, &stream, "default")
 	cmd.Flags().BoolVar(&jsonMode, "json", false, "print full JSON entry instead of plain text payload")
 	cmd.Flags().DurationVar(&interval, "interval", 2*time.Second, "polling interval")
-	cmd.Flags().Int64Var(&limit, "limit", 50, "entries per poll")
+	addLimitFlag(cmd, &limit, 50)
 	return cmd
 }
 
@@ -523,8 +553,8 @@ Example:
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "current stream name")
+	addStoreFlag(cmd, &store)
+	addStreamFlag(cmd, &stream, "default")
 	cmd.Flags().StringVar(&to, "to", "", "new stream name (required)")
 	return cmd
 }
@@ -538,8 +568,6 @@ func tailStream(
 	interval time.Duration,
 	jsonMode bool,
 ) error {
-	// Guard against a zero or negative interval which would starve select
-	// on the ticker channel.
 	if interval <= 0 {
 		interval = 2 * time.Second
 	}
@@ -563,8 +591,11 @@ func tailStream(
 		})
 		if err != nil {
 			if isRetryable(err) {
+				// Exponential back-off with jitter to avoid thundering-herd when
+				// all tail clients reconnect at the same time after a daemon restart.
 				backoff = min(backoff*2, 30*time.Second)
-				ticker.Reset(backoff)
+				jitter := time.Duration(rand.N(1000)) * time.Millisecond // #nosec G404 -- non-security jitter
+				ticker.Reset(backoff + jitter)
 				continue
 			}
 			return err
@@ -662,8 +693,8 @@ func newStreamStatCmd() *cobra.Command {
 			return nil
 		},
 	}
-	cmd.Flags().StringVarP(&store, "store", "s", "ledger_entries", "store (table/collection) name")
-	cmd.Flags().StringVarP(&stream, "stream", "S", "default", "stream ID")
+	addStoreFlag(cmd, &store)
+	addStreamFlag(cmd, &stream, "default")
 	return cmd
 }
 

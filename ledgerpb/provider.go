@@ -19,7 +19,7 @@ const (
 	APIKeyMetadataHeader = "x-api-key"
 )
 
-// ReadOptions configures how entries are fetched from a Backend.
+// ReadOptions configures how entries are fetched from a Provider.
 // It mirrors ledger.ReadOptions but uses plain Go values instead of functional
 // options so adapters can inspect the cursor without type assertions.
 type ReadOptions struct {
@@ -41,7 +41,7 @@ type InputEntry struct {
 	Tags          []string
 }
 
-// StoredEntry is an entry read back from a Backend.
+// StoredEntry is an entry read back from a Provider.
 type StoredEntry struct {
 	ID            string
 	Stream        string

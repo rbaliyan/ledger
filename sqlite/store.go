@@ -39,7 +39,6 @@ var (
 	_ ledger.HealthChecker                    = (*Store)(nil)
 	_ ledger.CursorStore                      = (*Store)(nil)
 	_ ledger.Searcher[int64, json.RawMessage] = (*Store)(nil)
-	_ ledger.SourceIDLookup[int64]         = (*Store)(nil)
 )
 
 // Store is a SQLite ledger store.

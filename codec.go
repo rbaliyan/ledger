@@ -12,6 +12,14 @@ type PayloadCodec[T, P any] interface {
 	Unmarshal(p P, v *T) error
 }
 
+// CloseableCodec is a [PayloadCodec] that holds internal resources (e.g. encoder
+// goroutines or reusable buffers) and must be closed when no longer needed.
+// [NewZstdCodec] and [NewZstdCodecLevel] return this interface.
+type CloseableCodec[T, P any] interface {
+	PayloadCodec[T, P]
+	Close()
+}
+
 // JSONCodec implements [PayloadCodec][T, json.RawMessage] using [encoding/json].
 // It is the default codec for the sqlite and postgres backends.
 type JSONCodec[T any] struct{}

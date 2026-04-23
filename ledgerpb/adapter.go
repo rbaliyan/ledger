@@ -152,8 +152,8 @@ type stringBackend struct {
 	health func(context.Context) error
 }
 
-// NewStringProvider wraps a Store[string, json.RawMessage] (MongoDB) as a Provider
-// for the gRPC Server.
+// NewStringProvider wraps a Store[string, json.RawMessage] (MongoDB, ClickHouse) as a
+// Provider for the gRPC Server.
 //
 // If the store also implements ledger.HealthChecker the Health endpoint is enabled.
 func NewStringProvider(s ledger.Store[string, json.RawMessage]) Provider {

@@ -12,7 +12,7 @@
 ## Key Features
 
 - Multiple Backends — Native support for SQLite, PostgreSQL, MongoDB, and ClickHouse.
-- Type Safety — Generic `Stream[I, T]` ensures compile-time safety for your entry payloads.
+- Type Safety — Generic `Stream[I, P, T]` ensures compile-time safety for your entry payloads.
 - Lightweight Streams — Create thousands of streams dynamically without configuration or lifecycle management.
 - Schema Versioning — Built-in `Upcaster` and `FieldMapper` to evolve your data models safely over time.
 - Pluggable Architecture — Easily implement custom backends or codecs (JSON, Protobuf, MsgPack).
@@ -91,7 +91,7 @@ func main() {
 
 ## CLI & Daemon
 
-The `ledger` CLI can run as a background daemon (SQLite or PostgreSQL) and provides subcommands for all stream operations.
+The `ledger` CLI can run as a background daemon and provides subcommands for all stream operations.
 
 ### Installation
 
@@ -174,11 +174,11 @@ ledger stream tail --stream orders --interval 1s
 | :--- | :---: | :---: | :---: | :--- |
 | **SQLite** | Yes | Yes | Yes | Transactional |
 | **PostgreSQL** | Yes | Yes | Yes | Transactional |
-| **MongoDB** | Yes | No | Yes | Batch (Partial) |
-| **ClickHouse** | Yes | No | No | Append-only (Async Trim) |
+| **MongoDB** | Yes | Yes | Yes | Batch (Partial) |
+| **ClickHouse** | Yes | Yes | No | Append-only (Async Trim) |
 
-MongoDB and ClickHouse are library-only backends; the daemon (`ledger start`) supports
-only SQLite and PostgreSQL. Use the Go library directly to write to MongoDB or ClickHouse.
+All four backends are supported by the daemon. Configure the backend in `config.yaml` via
+the `db.type` field (`sqlite`, `postgres`, `mongodb`, or `clickhouse`).
 
 ---
 
@@ -235,6 +235,27 @@ if err != nil {
     panic(err)
 }
 b.Start(ctx)
+```
+
+### Event Hooks (Daemon)
+
+The daemon can push new entries to HTTP endpoints as they appear, useful for audit
+logs, fan-out, or triggering downstream pipelines. Configure hooks in `config.yaml`:
+
+```yaml
+hooks:
+  - name: audit
+    store: orders          # which store to watch
+    url: "https://example.com/webhooks/ledger"
+    secret: "hmac-secret"  # signs each POST with X-Ledger-Signature (HMAC-SHA256)
+    max_retries: 5
+    interval: "5s"
+```
+
+Send SIGHUP to reload hooks without restarting the daemon:
+
+```bash
+kill -HUP $(cat ~/.ledger/ledger.pid)
 ```
 
 ---

@@ -15,7 +15,7 @@
 // updated after the entry is written.
 //
 // Backends: sqlite (Store[int64, json.RawMessage]), postgres (Store[int64, json.RawMessage]),
-// mongodb (Store[string, bson.Raw]).
+// mongodb (Store[string, bson.Raw]), clickhouse (Store[string, json.RawMessage]).
 package ledger
 
 import (
@@ -126,13 +126,6 @@ type CursorStore interface {
 	SetCursor(ctx context.Context, name string, cursor string) error
 }
 
-// SourceIDLookup is an optional interface that Store implementations may provide
-// to resolve a sink entry ID from its source entry ID.
-// Used by the Bridge to apply SetTags, SetAnnotations, and Trim mutations.
-type SourceIDLookup[I comparable] interface {
-	FindBySourceID(ctx context.Context, stream, sourceID string) (I, bool, error)
-}
-
 // RawEntry is an entry with an already-encoded payload, ready for storage.
 // P is the store-native payload type.
 type RawEntry[P any] struct {
@@ -181,15 +174,19 @@ func (o Order) String() string {
 	}
 }
 
+// metadataKV is a key-value pair used for metadata filtering.
+type metadataKV struct{ Key, Value string }
+
 // ReadOptions holds the parsed read parameters.
 // This type is intended for Store implementors.
 type ReadOptions struct {
-	after    any
-	limit    int
-	orderKey string
-	order    Order
-	tag      string
-	allTags  []string
+	after           any
+	limit           int
+	orderKey        string
+	order           Order
+	tag             string
+	allTags         []string
+	metadataFilters []metadataKV
 }
 
 // Limit returns the maximum number of entries to return.
@@ -209,6 +206,10 @@ func (o ReadOptions) Tag() string { return o.tag }
 
 // AllTags returns the all-tags filter, or nil if not set.
 func (o ReadOptions) AllTags() []string { return o.allTags }
+
+// MetadataFilters returns the metadata key-value filters, or nil if not set.
+// Currently only supported by the PostgreSQL backend.
+func (o ReadOptions) MetadataFilters() []metadataKV { return o.metadataFilters }
 
 func defaultReadOptions() ReadOptions {
 	return ReadOptions{
@@ -276,6 +277,18 @@ func WithTag(tag string) ReadOption {
 // WithAllTags returns a ReadOption that filters entries having ALL specified tags.
 func WithAllTags(tags ...string) ReadOption {
 	return func(o *ReadOptions) { o.allTags = tags }
+}
+
+// WithMetadataKey returns a ReadOption that filters entries whose metadata map
+// contains the given key with the given value. Multiple calls are ANDed.
+//
+// Only the PostgreSQL backend implements this filter. SQLite, MongoDB, and
+// ClickHouse backends silently ignore it (no error is returned by the library
+// layer; backend-specific checking is the caller's responsibility).
+func WithMetadataKey(key, value string) ReadOption {
+	return func(o *ReadOptions) {
+		o.metadataFilters = append(o.metadataFilters, metadataKV{Key: key, Value: value})
+	}
 }
 
 // ListOptions holds the parsed list parameters.

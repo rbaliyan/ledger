@@ -1,8 +1,8 @@
 // Package bridge provides stream bridging between ledger stores.
 // A Bridge polls a source store's mutation log and applies changes to a sink store.
 //
-// Mutation logging must be enabled on the source store via WithMutationLog (SQLite and
-// PostgreSQL backends only). The sink store may be any backend.
+// Mutation logging must be enabled on the source store via WithMutationLog (SQLite,
+// PostgreSQL, and MongoDB backends). The sink store may be any backend.
 //
 // Eventual consistency: tag and annotation updates may lag behind the source by up to
 // one polling interval. This is documented behaviour.
@@ -10,6 +10,7 @@ package bridge
 
 import (
 	"encoding/json"
+	"fmt"
 	"strconv"
 )
 
@@ -55,9 +56,11 @@ type IDCodec[I comparable] interface {
 }
 
 // Int64Codec implements IDCodec[int64] for SQLite and PostgreSQL stores.
+// Cursors are zero-padded to 19 digits so that lexicographic order in the
+// cursor column matches numeric order (avoids "9" > "10" edge cases).
 type Int64Codec struct{}
 
-func (Int64Codec) Encode(id int64) string         { return strconv.FormatInt(id, 10) }
+func (Int64Codec) Encode(id int64) string         { return fmt.Sprintf("%019d", id) }
 func (Int64Codec) Decode(s string) (int64, error) { return strconv.ParseInt(s, 10, 64) }
 func (Int64Codec) Zero() int64                    { return 0 }
 func (Int64Codec) Less(a, b int64) bool           { return a < b }
