@@ -26,9 +26,10 @@ type Server struct {
 	mux      *muxProvider
 	closer   io.Closer
 
-	mu         sync.Mutex // protects hooks and hookCancel
+	mu         sync.Mutex // protects hooks, hookCancel, and stopped
 	hooks      []*hookRunner
 	hookCancel context.CancelFunc
+	stopped    bool // set by Stop; prevents ReloadHooks from starting new goroutines
 }
 
 // New creates and configures the gRPC server from cfg.
@@ -91,9 +92,13 @@ func (s *Server) Addr() string { return s.listener.Addr().String() }
 
 // ReloadHooks cancels the current hook set, waits for them to stop, then
 // starts a new set from cfg.Hooks. The gRPC listener and backend connection
-// are not affected.
+// are not affected. No-ops if Stop has already been called.
 func (s *Server) ReloadHooks(cfg *config.Config) {
 	s.mu.Lock()
+	if s.stopped {
+		s.mu.Unlock()
+		return
+	}
 	cancel := s.hookCancel
 	old := s.hooks
 	s.mu.Unlock()
@@ -136,6 +141,7 @@ func (s *Server) Serve() error {
 // gRPC RPCs, then close the mux and backend connection.
 func (s *Server) Stop(ctx context.Context) {
 	s.mu.Lock()
+	s.stopped = true
 	cancel := s.hookCancel
 	hooks := s.hooks
 	s.mu.Unlock()

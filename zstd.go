@@ -42,7 +42,7 @@ func NewZstdCodec[T any]() (CloseableCodec[T, json.RawMessage], error) {
 	if err != nil {
 		return nil, fmt.Errorf("ledger/zstd: create encoder: %w", err)
 	}
-	dec, err := zstd.NewReader(nil)
+	dec, err := newZstdDecoder()
 	if err != nil {
 		enc.Close()
 		return nil, fmt.Errorf("ledger/zstd: create decoder: %w", err)
@@ -57,12 +57,21 @@ func NewZstdCodecLevel[T any](level zstd.EncoderLevel) (CloseableCodec[T, json.R
 	if err != nil {
 		return nil, fmt.Errorf("ledger/zstd: create encoder: %w", err)
 	}
-	dec, err := zstd.NewReader(nil)
+	dec, err := newZstdDecoder()
 	if err != nil {
 		enc.Close()
 		return nil, fmt.Errorf("ledger/zstd: create decoder: %w", err)
 	}
 	return &zstdCodec[T]{enc: enc, dec: dec}, nil
+}
+
+// newZstdDecoder creates a decoder with a 64 MiB memory cap to prevent
+// decompression bombs from exhausting process memory.
+func newZstdDecoder() (*zstd.Decoder, error) {
+	return zstd.NewReader(nil,
+		zstd.WithDecoderMaxMemory(64<<20),
+		zstd.WithDecodeAllCapLimit(true),
+	)
 }
 
 // Close releases internal encoder and decoder resources.

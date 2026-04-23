@@ -25,11 +25,15 @@ type options struct {
 	client  *http.Client
 }
 
+// noRedirect blocks all HTTP redirects. Webhook endpoints must respond directly;
+// following redirects to arbitrary destinations is a SSRF vector.
+func noRedirect(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }
+
 func defaultOptions() options {
 	return options{
 		headers: make(map[string]string),
 		retry:   defaultRetryPolicy(),
-		client:  http.DefaultClient,
+		client:  &http.Client{CheckRedirect: noRedirect},
 	}
 }
 

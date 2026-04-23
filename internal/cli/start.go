@@ -38,7 +38,7 @@ stderr (or log_file if configured). Useful for containers or systemd.`,
 				return err
 			}
 			if foreground {
-				return runDaemon(cmd.Context(), cfg, readyFD)
+				return runDaemon(cmd.Context(), cfg, flagConfig, readyFD)
 			}
 			return startBackground(cmd, cfg)
 		},
@@ -52,7 +52,12 @@ stderr (or log_file if configured). Useful for containers or systemd.`,
 // runDaemon is the actual daemon loop — called when --foreground is set.
 // readyFD, when non-zero, is a writable file descriptor; a single byte is
 // written to it once the server is listening so the parent knows it is ready.
-func runDaemon(ctx context.Context, cfg *config.Config, readyFD int) error {
+func runDaemon(ctx context.Context, cfg *config.Config, cfgPath string, readyFD int) error {
+	// Apply API key from environment (set by startBackground to avoid argv exposure).
+	if key := os.Getenv("LEDGER_API_KEY"); key != "" {
+		cfg.APIKey = key
+		_ = os.Unsetenv("LEDGER_API_KEY") // clear so child processes don't inherit it
+	}
 	firstRun := false
 	if _, err := os.Stat(filepath.Join(cfg.ConfigDir(), "config.yaml")); errors.Is(err, os.ErrNotExist) {
 		firstRun = true
@@ -124,10 +129,28 @@ func runDaemon(ctx context.Context, cfg *config.Config, readyFD int) error {
 		case err := <-errCh:
 			return err
 		case <-hupCh:
-			slog.Info("SIGHUP received: reloading hooks")
+			slog.Info("SIGHUP received: reloading config and hooks")
+			newCfg, err := reloadConfig(cfgPath, cfg)
+			if err != nil {
+				slog.Warn("SIGHUP config reload failed, keeping current hooks", "err", err)
+				continue
+			}
+			cfg = newCfg
 			srv.ReloadHooks(cfg)
 		}
 	}
+}
+
+// reloadConfig re-parses the config file from disk. If no explicit path was given
+// (i.e. the daemon was started with defaults), the default config file location
+// within the config directory is tried. Returns the original cfg on any error so
+// the caller can decide whether to continue with the stale config.
+func reloadConfig(cfgPath string, current *config.Config) (*config.Config, error) {
+	path := cfgPath
+	if path == "" {
+		path = filepath.Join(current.ConfigDir(), "config.yaml")
+	}
+	return config.LoadFrom(path)
 }
 
 // acquirePIDSafe acquires the PID file, handling the stale-PID race atomically.
@@ -146,12 +169,16 @@ func acquirePIDSafe(pidFile string) error {
 		return errors.New("ledger daemon is already running")
 	}
 	// Atomically move the stale file aside, then retry O_EXCL creation.
+	// Remove the stale file after a successful acquire to avoid leaving debris.
 	stale := pidFile + ".stale"
 	if renameErr := os.Rename(pidFile, stale); renameErr != nil && !errors.Is(renameErr, os.ErrNotExist) {
 		return renameErr
 	}
+	if err := daemon.AcquirePID(pidFile); err != nil {
+		return err
+	}
 	_ = os.Remove(stale)
-	return daemon.AcquirePID(pidFile)
+	return nil
 }
 
 // startBackground re-executes the binary with 'start --foreground' as a
@@ -183,17 +210,20 @@ func startBackground(cmd *cobra.Command, cfg *config.Config) error {
 	if flagConfig != "" {
 		args = append(args, "--config", flagConfig)
 	}
-	if flagAPIKey != "" {
-		args = append(args, "--api-key", flagAPIKey)
-	}
 	if flagAddr != "" {
 		args = append(args, "--addr", flagAddr)
+	}
+	// API key is passed via environment, not argv, to avoid exposure in `ps` output.
+	env := os.Environ()
+	if flagAPIKey != "" {
+		env = append(env, "LEDGER_API_KEY="+flagAPIKey)
 	}
 
 	proc := exec.Command(self, args...) // #nosec G204 -- self is os.Executable(), not user input
 	proc.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	proc.Stdout = nil
 	proc.Stderr = nil
+	proc.Env = env
 	proc.ExtraFiles = []*os.File{pw} // becomes FD 3 in child
 	if err := proc.Start(); err != nil {
 		_ = pr.Close()

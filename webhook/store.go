@@ -204,7 +204,7 @@ func (s *Sink) post(ctx context.Context, body []byte) error {
 		return fmt.Errorf("webhook: http: %w", err)
 	}
 	defer resp.Body.Close()
-	_, _ = io.Copy(io.Discard, resp.Body)
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 64*1024))
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return httpStatusError{code: resp.StatusCode}

@@ -103,16 +103,17 @@ func newHookRunner(cfg config.HookConfig, mux *muxProvider) (*hookRunner, error)
 // buildHookTransport constructs an http.RoundTripper from the hook's TLS config.
 func buildHookTransport(cfg config.HookConfig) (http.RoundTripper, error) {
 	tlsCfg := &tls.Config{
+		MinVersion:         tls.VersionTLS12,
 		InsecureSkipVerify: cfg.InsecureSkipVerify, //nolint:gosec // operator opt-in
 	}
 	if cfg.CA != "" {
 		pem, err := os.ReadFile(cfg.CA) // #nosec G304 -- explicit config path
 		if err != nil {
-			return nil, fmt.Errorf("read CA %q: %w", cfg.CA, err)
+			return nil, fmt.Errorf("read CA: %w", err)
 		}
 		pool := x509.NewCertPool()
 		if !pool.AppendCertsFromPEM(pem) {
-			return nil, fmt.Errorf("invalid CA certificate at %q", cfg.CA)
+			return nil, fmt.Errorf("invalid CA certificate")
 		}
 		tlsCfg.RootCAs = pool
 	}

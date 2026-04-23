@@ -34,6 +34,7 @@ package ledgerpb
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 
 	ledgerv1 "github.com/rbaliyan/ledger/api/ledger/v1"
 	"google.golang.org/grpc/codes"
@@ -226,10 +227,12 @@ func (s *Server) RenameStream(ctx context.Context, req *ledgerv1.RenameStreamReq
 }
 
 // Health reports backend connectivity. The gRPC call always succeeds; the
-// status string carries the health information ("ok" or an error description).
+// status string is "ok" or "degraded". Full error details are logged server-side
+// only, to avoid leaking connection strings or internal topology to callers.
 func (s *Server) Health(ctx context.Context, req *ledgerv1.HealthRequest) (*ledgerv1.HealthResponse, error) {
 	if err := s.provider.Health(ctx); err != nil {
-		return &ledgerv1.HealthResponse{Status: err.Error()}, nil
+		slog.Warn("health check failed", "err", err)
+		return &ledgerv1.HealthResponse{Status: "degraded"}, nil
 	}
 	return &ledgerv1.HealthResponse{Status: "ok"}, nil
 }

@@ -97,17 +97,14 @@ func (m *mongoMetaStore) rename(ctx context.Context, storeName, oldName, newName
 	if oldName == newName {
 		return nil
 	}
-	if _, ok, err := m.resolve(ctx, storeName, newName); err != nil {
-		return fmt.Errorf("meta: rename check target %q: %w", newName, err)
-	} else if ok {
-		return fmt.Errorf("%w: %q in store %q", ledger.ErrStreamExists, newName, storeName)
-	}
-
 	res, err := m.coll.UpdateOne(ctx,
 		bson.D{{Key: "store_name", Value: storeName}, {Key: "name", Value: oldName}},
 		bson.D{{Key: "$set", Value: bson.D{{Key: "name", Value: newName}}}},
 	)
 	if err != nil {
+		if mongo.IsDuplicateKeyError(err) {
+			return fmt.Errorf("%w: %q in store %q", ledger.ErrStreamExists, newName, storeName)
+		}
 		return fmt.Errorf("meta: rename stream %q: %w", oldName, err)
 	}
 	if res.MatchedCount == 0 {
