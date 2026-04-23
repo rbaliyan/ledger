@@ -11,14 +11,35 @@ import (
 
 // Config holds the full ledger daemon configuration.
 type Config struct {
-	Listen  string    `yaml:"listen"`
-	LogFile string    `yaml:"log_file"`
-	APIKey  string    `yaml:"api_key"`
-	TLS     TLSConfig `yaml:"tls"`
-	DB      DBConfig  `yaml:"db"`
+	Listen        string       `yaml:"listen"`
+	LogFile       string       `yaml:"log_file"`
+	APIKey        string       `yaml:"api_key"`
+	AllowedStores []string     `yaml:"allowed_stores"` // optional allow-list of store names for the API key
+	StartTimeout  string       `yaml:"start_timeout"`  // background-start readiness timeout (default: "5s")
+	TLS           TLSConfig    `yaml:"tls"`
+	DB            DBConfig     `yaml:"db"`
+	Hooks         []HookConfig `yaml:"hooks"`
 
 	// configDir is the directory from which this config was loaded.
 	configDir string
+}
+
+// HookConfig describes a webhook event hook that delivers new entries to an
+// HTTP endpoint whenever they are appended to a store or stream.
+//
+// Note: hook cursors are stored in memory. If the daemon restarts, each hook
+// re-delivers from the beginning of every stream. Avoid stateful side-effects
+// in webhook consumers, or use dedup_key to deduplicate re-deliveries.
+type HookConfig struct {
+	Name               string `yaml:"name"`                 // unique name for this hook (required)
+	Store              string `yaml:"store"`                // store name (table/collection) to watch (required)
+	Stream             string `yaml:"stream"`               // stream filter; empty = all streams in the store
+	URL                string `yaml:"url"`                  // webhook POST URL (required)
+	Secret             string `yaml:"secret"`               // HMAC-SHA256 secret; adds X-Ledger-Signature header
+	MaxRetries         int    `yaml:"max_retries"`          // delivery attempts (default: 5)
+	Interval           string `yaml:"interval"`             // polling interval (default: "5s")
+	CA                 string `yaml:"ca"`                   // path to CA cert for TLS verification
+	InsecureSkipVerify bool   `yaml:"insecure_skip_verify"` // skip TLS certificate verification
 }
 
 // TLSConfig holds TLS certificate paths.
@@ -30,10 +51,16 @@ type TLSConfig struct {
 
 // DBConfig selects the backend and its per-backend settings.
 type DBConfig struct {
-	Type     string        `yaml:"type"` // "sqlite", "postgres", "mongodb"
-	SQLite   SQLiteConfig  `yaml:"sqlite"`
-	Postgres PostgresConfig `yaml:"postgres"`
-	MongoDB  MongoDBConfig  `yaml:"mongodb"`
+	Type       string          `yaml:"type"` // "sqlite", "postgres", "mongodb", "clickhouse"
+	SQLite     SQLiteConfig    `yaml:"sqlite"`
+	Postgres   PostgresConfig  `yaml:"postgres"`
+	MongoDB    MongoDBConfig   `yaml:"mongodb"`
+	ClickHouse ClickHouseConfig `yaml:"clickhouse"`
+}
+
+// ClickHouseConfig holds ClickHouse connection settings.
+type ClickHouseConfig struct {
+	DSN string `yaml:"dsn"`
 }
 
 // SQLiteConfig holds SQLite-specific settings.

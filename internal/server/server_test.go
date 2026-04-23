@@ -10,8 +10,10 @@ import (
 	"github.com/rbaliyan/ledger/internal/server"
 	"github.com/rbaliyan/ledger/ledgerpb"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	_ "modernc.org/sqlite"
 )
@@ -205,6 +207,54 @@ func TestServerRenameStream(t *testing.T) {
 	}
 	if len(listResp.StreamIds) != 1 || listResp.StreamIds[0] != "new-name" {
 		t.Errorf("ListStreamIDs = %v, want [new-name]", listResp.StreamIds)
+	}
+}
+
+func TestServerAllowedStores(t *testing.T) {
+	cfg := &config.Config{
+		Listen: "127.0.0.1:0",
+		APIKey: "secret",
+		DB: config.DBConfig{
+			Type:   "sqlite",
+			SQLite: config.SQLiteConfig{Path: ":memory:"},
+		},
+		AllowedStores: []string{"allowed"},
+	}
+
+	srv, err := server.New(t.Context(), cfg)
+	if err != nil {
+		t.Fatalf("server.New: %v", err)
+	}
+	t.Cleanup(func() { srv.Stop(context.Background()) })
+	go func() { _ = srv.Serve() }()
+
+	conn, err := grpc.NewClient(srv.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	client := ledgerv1.NewLedgerServiceClient(conn)
+
+	authMD := metadata.Pairs(ledgerpb.APIKeyMetadataHeader, "secret")
+
+	// Access to an allowed store should succeed.
+	allowedCtx := metadata.NewOutgoingContext(t.Context(), metadata.Join(
+		authMD, metadata.Pairs(ledgerpb.StoreMetadataHeader, "allowed"),
+	))
+	if _, err := client.Count(allowedCtx, &ledgerv1.CountRequest{Stream: "s"}); err != nil {
+		t.Fatalf("expected success for allowed store, got: %v", err)
+	}
+
+	// Access to a denied store should return PermissionDenied.
+	deniedCtx := metadata.NewOutgoingContext(t.Context(), metadata.Join(
+		authMD, metadata.Pairs(ledgerpb.StoreMetadataHeader, "denied"),
+	))
+	_, err = client.Count(deniedCtx, &ledgerv1.CountRequest{Stream: "s"})
+	if err == nil {
+		t.Fatal("expected permission denied for unlisted store, got nil")
+	}
+	if status, ok := status.FromError(err); !ok || status.Code() != codes.PermissionDenied {
+		t.Errorf("expected PermissionDenied, got: %v", err)
 	}
 }
 

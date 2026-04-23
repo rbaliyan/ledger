@@ -73,19 +73,8 @@ func runDaemon(ctx context.Context, cfg *config.Config, readyFD int) error {
 	}
 
 	pidFile := cfg.PIDFile()
-	if err := daemon.AcquirePID(pidFile); err != nil {
-		if errors.Is(err, os.ErrExist) {
-			pid, _ := daemon.ReadPID(pidFile)
-			if daemon.IsAlive(pid) {
-				return errors.New("ledger daemon is already running")
-			}
-			_ = daemon.RemovePID(pidFile)
-			if err := daemon.AcquirePID(pidFile); err != nil {
-				return err
-			}
-		} else {
-			return err
-		}
+	if err := acquirePIDSafe(pidFile); err != nil {
+		return err
 	}
 	defer func() {
 		if err := daemon.RemovePID(pidFile); err != nil {
@@ -114,20 +103,55 @@ func runDaemon(ctx context.Context, cfg *config.Config, readyFD int) error {
 		_ = pipe.Close()
 	}
 
-	ctx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
+	sigCtx, stop := signal.NotifyContext(ctx, syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
+
+	// SIGHUP reloads the configuration and rebuilds hooks without restarting
+	// the gRPC listener or dropping the backend connection.
+	hupCh := make(chan os.Signal, 1)
+	signal.Notify(hupCh, syscall.SIGHUP)
+	defer signal.Stop(hupCh)
 
 	errCh := make(chan error, 1)
 	go func() { errCh <- srv.Serve() }()
 
-	select {
-	case <-ctx.Done():
-		slog.Info("shutting down ledger daemon")
-		srv.Stop(context.Background())
+	for {
+		select {
+		case <-sigCtx.Done():
+			slog.Info("shutting down ledger daemon")
+			srv.Stop(context.Background())
+			return nil
+		case err := <-errCh:
+			return err
+		case <-hupCh:
+			slog.Info("SIGHUP received: reloading hooks")
+			srv.ReloadHooks(cfg)
+		}
+	}
+}
+
+// acquirePIDSafe acquires the PID file, handling the stale-PID race atomically.
+// If the file exists and the recorded process is dead, it renames the stale file
+// and retries, avoiding the TOCTOU window of read-check-delete-recreate.
+func acquirePIDSafe(pidFile string) error {
+	err := daemon.AcquirePID(pidFile)
+	if err == nil {
 		return nil
-	case err := <-errCh:
+	}
+	if !errors.Is(err, os.ErrExist) {
 		return err
 	}
+	pid, _ := daemon.ReadPID(pidFile)
+	if daemon.IsAlive(pid) {
+		return errors.New("ledger daemon is already running")
+	}
+	// Atomically move the stale file aside, then retry O_EXCL creation.
+	stale := pidFile + ".stale"
+	if renameErr := os.Rename(pidFile, stale); renameErr != nil && !errors.Is(renameErr, os.ErrNotExist) {
+		return renameErr
+	}
+	_ = os.Remove(stale)
+	return daemon.AcquirePID(pidFile)
 }
 
 // startBackground re-executes the binary with 'start --foreground' as a
@@ -181,7 +205,7 @@ func startBackground(cmd *cobra.Command, cfg *config.Config) error {
 	_ = pw.Close()
 	_ = proc.Process.Release()
 
-	const readyTimeout = 5 * time.Second
+	readyTimeout := startTimeout(cfg)
 	type result struct{ err error }
 	ch := make(chan result, 1)
 	go func() {
@@ -209,6 +233,24 @@ func startBackground(cmd *cobra.Command, cfg *config.Config) error {
 	}
 }
 
+// startTimeout returns the readiness timeout for background start, using the
+// configured value or a sensible per-driver default.
+func startTimeout(cfg *config.Config) time.Duration {
+	if cfg.StartTimeout != "" {
+		if d, err := time.ParseDuration(cfg.StartTimeout); err == nil && d > 0 {
+			return d
+		}
+	}
+	switch cfg.DB.Type {
+	case "postgres", "mongodb":
+		return 15 * time.Second
+	case "clickhouse":
+		return 20 * time.Second
+	default: // sqlite
+		return 5 * time.Second
+	}
+}
+
 func logFileHint(cfg *config.Config) string {
 	if cfg.LogFile != "" {
 		return cfg.LogFile
@@ -221,7 +263,8 @@ func logFileHint(cfg *config.Config) string {
 func writeDefaultConfig(cfg *config.Config) error {
 	path := filepath.Join(cfg.ConfigDir(), "config.yaml")
 	content := fmt.Sprintf(`# Ledger daemon configuration
-# Edit this file to customise the daemon, then restart with: ledger stop && ledger start
+# Edit this file to customise the daemon, then reload with: kill -HUP <pid>
+# or restart with: ledger stop && ledger start
 
 # Address the gRPC server listens on.
 listen: %q
@@ -233,6 +276,13 @@ listen: %q
 # Clients must supply the key in the x-api-key gRPC metadata header.
 # api_key: ""
 
+# Optional: restrict the API key to specific store names.
+# allowed_stores: ["orders", "users"]
+
+# Optional: override the background-start readiness timeout (default is
+# driver-specific: sqlite=5s, postgres/mongodb=15s, clickhouse=20s).
+# start_timeout: "10s"
+
 # TLS configuration (leave blank to use plain-text gRPC).
 # tls:
 #   cert: "/path/to/server.crt"
@@ -241,8 +291,7 @@ listen: %q
 
 # Database backend.
 db:
-  # Backend type: sqlite | postgres
-  # MongoDB and ClickHouse are library-only; the daemon does not support them.
+  # Backend type: sqlite | postgres | mongodb | clickhouse
   type: sqlite
   sqlite:
     path: %q
@@ -250,6 +299,28 @@ db:
   # PostgreSQL — used when type: postgres
   # postgres:
   #   dsn: "postgres://user:pass@localhost:5432/ledger?sslmode=disable"
+
+  # MongoDB — used when type: mongodb
+  # mongodb:
+  #   uri:      "mongodb://localhost:27017"
+  #   database: "ledger"
+
+  # ClickHouse — used when type: clickhouse
+  # clickhouse:
+  #   dsn: "tcp://localhost:9000?database=ledger"
+
+# Optional: webhook event hooks that deliver entries to HTTP endpoints.
+# Hooks poll the configured store and POST new entries as they appear.
+# Note: cursors are in-memory; re-delivery occurs on daemon restart.
+# hooks:
+#   - name: audit
+#     store: orders
+#     url: "https://example.com/webhooks/ledger"
+#     secret: ""               # signs each POST with X-Ledger-Signature (HMAC-SHA256)
+#     max_retries: 5
+#     interval: "5s"
+#     # ca: "/path/to/ca.crt"
+#     # insecure_skip_verify: false
 `, cfg.Listen, cfg.DB.SQLite.Path)
 	return os.WriteFile(path, []byte(content), 0o600)
 }

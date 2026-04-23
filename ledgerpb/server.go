@@ -99,6 +99,9 @@ func (s *Server) Read(ctx context.Context, req *ledgerv1.ReadRequest) (*ledgerv1
 
 // Count returns the total number of entries in the named stream.
 func (s *Server) Count(ctx context.Context, req *ledgerv1.CountRequest) (*ledgerv1.CountResponse, error) {
+	if req.Stream == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "stream must not be empty")
+	}
 	n, err := s.provider.Count(ctx, req.Stream)
 	if err != nil {
 		return nil, toGRPCStatus(err)
@@ -108,6 +111,12 @@ func (s *Server) Count(ctx context.Context, req *ledgerv1.CountRequest) (*ledger
 
 // SetTags replaces all tags on an existing entry.
 func (s *Server) SetTags(ctx context.Context, req *ledgerv1.SetTagsRequest) (*ledgerv1.SetTagsResponse, error) {
+	if req.Stream == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "stream must not be empty")
+	}
+	if req.Id == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "id must not be empty")
+	}
 	if err := s.provider.SetTags(ctx, req.Stream, req.Id, req.Tags); err != nil {
 		return nil, toGRPCStatus(err)
 	}
@@ -117,6 +126,12 @@ func (s *Server) SetTags(ctx context.Context, req *ledgerv1.SetTagsRequest) (*le
 // SetAnnotations merges annotations onto an existing entry.
 // Keys in req.Set are upserted; keys in req.Delete are removed.
 func (s *Server) SetAnnotations(ctx context.Context, req *ledgerv1.SetAnnotationsRequest) (*ledgerv1.SetAnnotationsResponse, error) {
+	if req.Stream == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "stream must not be empty")
+	}
+	if req.Id == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "id must not be empty")
+	}
 	annotations := make(map[string]*string, len(req.Set)+len(req.Delete))
 	for k, v := range req.Set {
 		v := v
@@ -133,6 +148,12 @@ func (s *Server) SetAnnotations(ctx context.Context, req *ledgerv1.SetAnnotation
 
 // Trim deletes entries with ID <= before_id and returns the number deleted.
 func (s *Server) Trim(ctx context.Context, req *ledgerv1.TrimRequest) (*ledgerv1.TrimResponse, error) {
+	if req.Stream == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "stream must not be empty")
+	}
+	if req.BeforeId == "" {
+		return nil, status.Errorf(codes.InvalidArgument, "before_id must not be empty")
+	}
 	deleted, err := s.provider.Trim(ctx, req.Stream, req.BeforeId)
 	if err != nil {
 		return nil, toGRPCStatus(err)

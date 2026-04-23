@@ -7,7 +7,7 @@
 //
 // # Bridge sink
 //
-// The store implements [ledger.CursorStore] and [ledger.SourceIDLookup] so it
+// The store implements [ledger.CursorStore] and FindBySourceID so it
 // can be used as a sink with [bridge.Bridge]. Always pair it with
 // [bridge.WithSkipMutationTypes](MutationSetTags, MutationSetAnnotations)
 // on the Bridge, and create the source store with [WithAppendOnly] (or the
@@ -44,7 +44,6 @@ var (
 	_ ledger.Store[string, json.RawMessage] = (*Store)(nil)
 	_ ledger.HealthChecker                  = (*Store)(nil)
 	_ ledger.CursorStore                    = (*Store)(nil)
-	_ ledger.SourceIDLookup[string]         = (*Store)(nil)
 )
 
 // Store is a ClickHouse ledger store. SetTags and SetAnnotations always return

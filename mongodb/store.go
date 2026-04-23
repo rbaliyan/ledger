@@ -33,7 +33,6 @@ var (
 	_ ledger.Store[string, bson.Raw]  = (*Store)(nil)
 	_ ledger.HealthChecker            = (*Store)(nil)
 	_ ledger.CursorStore              = (*Store)(nil)
-	_ ledger.SourceIDLookup[string]   = (*Store)(nil)
 	_ ledger.Searcher[string, bson.Raw] = (*Store)(nil)
 	_ ledger.SearchIndexer            = (*Store)(nil)
 )

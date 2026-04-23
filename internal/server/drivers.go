@@ -26,7 +26,7 @@ func sqliteDriver(ctx context.Context, cfg *config.Config) (DriverResources, err
 	if err != nil {
 		return DriverResources{}, err
 	}
-	meta, err := newStreamMetaStore(ctx, db, "sqlite")
+	meta, err := newSQLMetaStore(ctx, db, "sqlite")
 	if err != nil {
 		_ = db.Close()
 		return DriverResources{}, err
@@ -46,7 +46,7 @@ func postgresDriver(ctx context.Context, cfg *config.Config) (DriverResources, e
 	if err != nil {
 		return DriverResources{}, err
 	}
-	meta, err := newStreamMetaStore(ctx, db, "postgres")
+	meta, err := newSQLMetaStore(ctx, db, "postgres")
 	if err != nil {
 		_ = db.Close()
 		return DriverResources{}, err

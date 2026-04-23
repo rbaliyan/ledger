@@ -64,13 +64,16 @@ ledger/
     ├── cli/          # Cobra commands: stream (append/read/search/count/list/stat/tag/annotate/trim/rename/tail), start/stop/status
     ├── config/       # Config struct, LoadFrom, Defaults — no discovery, explicit path only
     ├── daemon/       # PID file management (AcquirePID, ReadPID, IsAlive, RemovePID)
-    └── server/       # gRPC server wiring: driver registry, muxProvider, streamMetaStore, apiKeyGuard
+    └── server/       # gRPC server wiring: driver registry, muxProvider, metaStore, apiKeyGuard
         ├── driver_registry.go  # RegisterDriver, DriverResources, openDriver
         ├── drivers.go          # init() registers sqlite and postgres drivers
-        ├── meta.go             # streamMetaStore: human-readable name ↔ internal UUID mapping
+        ├── driver_mongo.go     # MongoDB driver registration
+        ├── driver_clickhouse.go # ClickHouse driver registration
+        ├── meta.go             # metaStore: human-readable name ↔ internal UUID mapping
         ├── mux.go              # muxProvider: routes calls to per-store backends, resolves stream names
         ├── guard.go            # apiKeyGuard: SecurityGuard using shared-secret API key
-        └── server.go           # Server: New, Serve, Stop
+        ├── hooks.go            # hookRunner: polls stores and delivers entries to HTTP endpoints
+        └── server.go           # Server: New, Serve, Stop, ReloadHooks
 ```
 
 ### Key Design Patterns
@@ -84,7 +87,7 @@ ledger/
 - **Dedup**: Partial unique index on `(stream, dedup_key) WHERE dedup_key != ''`
 - **Cursor-based pagination**: `After[I](id)` + `Limit(n)` (default 100) + `Desc()`
 - **Metadata**: `map[string]string` on all entry types, stored as JSON (SQL) or BSON subdocument (MongoDB)
-- **Optional interfaces**: `Searcher[I,P]`, `HealthChecker`, `CursorStore`, `SourceIDLookup` — type-assert to check capability
+- **Optional interfaces**: `Searcher[I,P]`, `HealthChecker`, `CursorStore` — type-assert to check capability
 
 ### Stream Construction
 
@@ -149,8 +152,8 @@ Each backend's concrete `*Store` also exposes `Type() string` returning its tabl
 
 - `HealthChecker`: `Health(ctx) error` — all backends implement this
 - `Searcher[I,P]`: `Search(ctx, stream, query, ...ReadOption)` — SQLite, PostgreSQL, MongoDB
-- `CursorStore`: `GetCursor` / `SetCursor` — ClickHouse (for bridge replication)
-- `SourceIDLookup[I]`: `FindBySourceID` — ClickHouse (for bridge replication)
+- `CursorStore`: `GetCursor` / `SetCursor` — SQLite, PostgreSQL, MongoDB, ClickHouse (for bridge replication)
+- `FindBySourceID(ctx, stream, sourceID)` (sinkLookup in bridge) — SQLite, PostgreSQL, MongoDB, ClickHouse (for bridge replication)
 
 ### Atomicity Note
 

@@ -36,7 +36,6 @@ var (
 	_ ledger.Store[int64, json.RawMessage]    = (*Store)(nil)
 	_ ledger.HealthChecker                    = (*Store)(nil)
 	_ ledger.CursorStore                      = (*Store)(nil)
-	_ ledger.SourceIDLookup[int64]            = (*Store)(nil)
 	_ ledger.Searcher[int64, json.RawMessage] = (*Store)(nil)
 	_ ledger.SearchIndexer                    = (*Store)(nil)
 )
@@ -159,10 +158,13 @@ func (s *Store) createAsyncIndexes(logger *slog.Logger) {
 	if s.closed.Load() {
 		return
 	}
-	// GIN index for tag-based filtering. Created async to avoid blocking startup.
-	idx := fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_%s_tags ON %s USING gin(tags)`, s.table, s.table)
-	if _, err := s.db.Exec(idx); err != nil && !s.closed.Load() {
-		logger.Warn("failed to create tags GIN index", "error", err)
+	for _, ddl := range []string{
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_%s_tags ON %s USING gin(tags)`, s.table, s.table),
+		fmt.Sprintf(`CREATE INDEX IF NOT EXISTS idx_%s_metadata ON %s USING gin(metadata)`, s.table, s.table),
+	} {
+		if _, err := s.db.Exec(ddl); err != nil && !s.closed.Load() {
+			logger.Warn("failed to create async GIN index", "error", err, "ddl", ddl)
+		}
 	}
 }
 
@@ -370,6 +372,14 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 		tagsJSON, _ := json.Marshal(allTags)
 		args = append(args, string(tagsJSON))
 	}
+	// Metadata key-value filtering uses JSONB containment (@>).
+	// A GIN index on the metadata column (created asynchronously at store open) makes this efficient.
+	for _, kv := range o.MetadataFilters() {
+		argN++
+		clauses = append(clauses, fmt.Sprintf("metadata @> $%d::jsonb", argN))
+		kvJSON, _ := json.Marshal(map[string]string{kv.Key: kv.Value})
+		args = append(args, string(kvJSON))
+	}
 
 	dir := "ASC"
 	if o.Order() == ledger.Descending {
@@ -404,13 +414,21 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 		}
 		e.Payload = json.RawMessage(payloadBytes)
 		if len(meta) > 0 {
-			e.Metadata, _ = decodeJSONB(meta)
+			var err error
+			if e.Metadata, err = decodeJSONB(meta); err != nil {
+				return nil, fmt.Errorf("ledger/postgres: decode metadata at id=%d: %w", e.ID, err)
+			}
 		}
 		if len(tagsJSON) > 0 {
-			json.Unmarshal(tagsJSON, &e.Tags) //nolint:errcheck
+			if err := json.Unmarshal(tagsJSON, &e.Tags); err != nil {
+				return nil, fmt.Errorf("ledger/postgres: decode tags at id=%d: %w", e.ID, err)
+			}
 		}
 		if len(annotations) > 0 {
-			e.Annotations, _ = decodeJSONB(annotations)
+			var err error
+			if e.Annotations, err = decodeJSONB(annotations); err != nil {
+				return nil, fmt.Errorf("ledger/postgres: decode annotations at id=%d: %w", e.ID, err)
+			}
 		}
 		if updatedAt.Valid {
 			e.UpdatedAt = &updatedAt.Time
@@ -539,13 +557,21 @@ func (s *Store) Search(ctx context.Context, stream string, query string, opts ..
 		}
 		e.Payload = json.RawMessage(payloadBytes)
 		if len(meta) > 0 {
-			e.Metadata, _ = decodeJSONB(meta)
+			var err error
+			if e.Metadata, err = decodeJSONB(meta); err != nil {
+				return nil, fmt.Errorf("ledger/postgres: decode metadata at id=%d: %w", e.ID, err)
+			}
 		}
 		if len(tagsJSON) > 0 {
-			json.Unmarshal(tagsJSON, &e.Tags) //nolint:errcheck
+			if err := json.Unmarshal(tagsJSON, &e.Tags); err != nil {
+				return nil, fmt.Errorf("ledger/postgres: decode tags at id=%d: %w", e.ID, err)
+			}
 		}
 		if len(annotations) > 0 {
-			e.Annotations, _ = decodeJSONB(annotations)
+			var err error
+			if e.Annotations, err = decodeJSONB(annotations); err != nil {
+				return nil, fmt.Errorf("ledger/postgres: decode annotations at id=%d: %w", e.ID, err)
+			}
 		}
 		if updatedAt.Valid {
 			e.UpdatedAt = &updatedAt.Time

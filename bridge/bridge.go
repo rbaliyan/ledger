@@ -43,7 +43,7 @@ type Bridge[SI comparable, DI comparable] struct {
 	mutations         ledger.Store[SI, json.RawMessage]
 	sink              ledger.Store[DI, json.RawMessage]
 	sinkCursor        ledger.CursorStore
-	sinkLookup        ledger.SourceIDLookup[DI]
+	sinkLookup        sinkLookup[DI]
 	codec             IDCodec[SI]
 	name              string
 	interval          time.Duration
@@ -55,6 +55,8 @@ type Bridge[SI comparable, DI comparable] struct {
 	tracer        trace.Tracer
 	metrics       *bridgeMetrics
 	enableTraces  bool
+
+	parallelStreams int // 0 or 1 = serial; >1 = parallel across streams
 
 	startOnce  sync.Once
 	stopOnce   sync.Once
@@ -74,6 +76,7 @@ type options struct {
 	name              string
 	interval          time.Duration
 	batchSize         int
+	parallelStreams    int
 	logger            *slog.Logger
 	skipMutationTypes map[MutationType]struct{}
 	// OTel
@@ -125,6 +128,20 @@ func WithLogger(l *slog.Logger) Option {
 	return func(o *options) { o.logger = l }
 }
 
+// WithParallelStreams enables concurrent mutation processing across independent
+// streams. n goroutines process distinct streams simultaneously; events within
+// the same stream are always applied in order. The default (n <= 1) is serial.
+//
+// Use this when the sink is remote (e.g. a database or webhook) and latency
+// per mutation dominates throughput. Safe to set to runtime.NumCPU().
+func WithParallelStreams(n int) Option {
+	return func(o *options) {
+		if n > 1 {
+			o.parallelStreams = n
+		}
+	}
+}
+
 // WithSkipMutationTypes instructs the Bridge to silently drop mutation events of the
 // given types instead of applying them to the sink. Use this when the sink backend does
 // not support the operation — e.g. pass MutationSetTags and MutationSetAnnotations when
@@ -145,7 +162,7 @@ func WithSkipMutationTypes(types ...MutationType) Option {
 //
 // If sink implements [ledger.CursorStore], progress is persisted in the sink DB so the
 // Bridge resumes from where it left off after a restart.
-// If sink implements [ledger.SourceIDLookup], SetTags, SetAnnotations, and Trim mutations
+// If sink implements FindBySourceID (sinkLookup), SetTags, SetAnnotations, and Trim mutations
 // are applied; otherwise they are skipped with a warning.
 //
 // Returns an error only if OTel metrics initialisation fails (when [WithMetricsEnabled](true)
@@ -167,6 +184,7 @@ func New[SI comparable, DI comparable](
 		name:              o.name,
 		interval:          o.interval,
 		batchSize:         o.batchSize,
+		parallelStreams:    o.parallelStreams,
 		logger:            o.logger,
 		skipMutationTypes: o.skipMutationTypes,
 		enableTraces:      o.enableTraces,
@@ -174,7 +192,7 @@ func New[SI comparable, DI comparable](
 		stopped:           make(chan struct{}),
 	}
 	b.sinkCursor, _ = sink.(ledger.CursorStore)
-	b.sinkLookup, _ = sink.(ledger.SourceIDLookup[DI])
+	b.sinkLookup, _ = sink.(sinkLookup[DI])
 	if b.sinkCursor == nil {
 		o.logger.Warn("bridge sink does not implement CursorStore; progress will not be persisted across restarts", "name", o.name)
 	}
@@ -314,19 +332,34 @@ func (b *Bridge[SI, DI]) poll(ctx context.Context) error {
 		b.metrics.lagSeconds.Record(ctx, lag, metric.WithAttributes(nameAttr))
 	}
 
-	var lastID SI
+	// Decode all events up front so decode errors surface regardless of parallelism.
+	events := make([]MutationEvent, 0, len(entries))
 	for _, e := range entries {
 		var evt MutationEvent
 		if err := json.Unmarshal(e.Payload, &evt); err != nil {
 			b.recordPoll(ctx, start, nameAttr, true)
 			return fmt.Errorf("decode mutation event: %w", err)
 		}
-		if err := b.apply(ctx, evt); err != nil {
-			b.recordPoll(ctx, start, nameAttr, true)
-			return fmt.Errorf("apply %s mutation on stream %q: %w", evt.Type, evt.Stream, err)
-		}
-		lastID = e.ID
+		events = append(events, evt)
 	}
+
+	var applyErr error
+	if b.parallelStreams > 1 {
+		applyErr = b.applyBatchParallel(ctx, events)
+	} else {
+		for _, evt := range events {
+			if err := b.apply(ctx, evt); err != nil {
+				applyErr = fmt.Errorf("apply %s mutation on stream %q: %w", evt.Type, evt.Stream, err)
+				break
+			}
+		}
+	}
+	if applyErr != nil {
+		b.recordPoll(ctx, start, nameAttr, true)
+		return applyErr
+	}
+
+	lastID := entries[len(entries)-1].ID
 
 	b.logger.Debug("bridge poll: applied mutations", "name", b.name, "count", len(entries), "cursor", b.codec.Encode(lastID))
 	b.recordPoll(ctx, start, nameAttr, false)
@@ -425,6 +458,70 @@ func (b *Bridge[SI, DI]) apply(ctx context.Context, evt MutationEvent) error {
 	return err
 }
 
+// applyBatchParallel processes events concurrently across independent streams.
+// Events within the same stream are always applied in order. Returns the first
+// error encountered; remaining in-flight goroutines drain their queues before
+// returning so the cursor is not advanced past a failed batch.
+func (b *Bridge[SI, DI]) applyBatchParallel(ctx context.Context, events []MutationEvent) error {
+	type streamGroup struct {
+		stream string
+		events []MutationEvent
+	}
+
+	// Group events by stream, preserving per-stream insertion order.
+	groupMap := make(map[string]*streamGroup, len(events))
+	order := make([]string, 0, len(events))
+	for _, evt := range events {
+		g, ok := groupMap[evt.Stream]
+		if !ok {
+			g = &streamGroup{stream: evt.Stream}
+			groupMap[evt.Stream] = g
+			order = append(order, evt.Stream)
+		}
+		g.events = append(g.events, evt)
+	}
+
+	work := make(chan *streamGroup, len(order))
+	for _, s := range order {
+		work <- groupMap[s]
+	}
+	close(work)
+
+	workers := b.parallelStreams
+	if workers > len(order) {
+		workers = len(order)
+	}
+
+	var (
+		wg    sync.WaitGroup
+		mu    sync.Mutex
+		first error
+	)
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for group := range work {
+				for _, evt := range group.events {
+					if ctx.Err() != nil {
+						return
+					}
+					if err := b.apply(ctx, evt); err != nil {
+						mu.Lock()
+						if first == nil {
+							first = fmt.Errorf("apply %s on stream %q: %w", evt.Type, evt.Stream, err)
+						}
+						mu.Unlock()
+						return
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	return first
+}
+
 func (b *Bridge[SI, DI]) applyAppend(ctx context.Context, evt MutationEvent) error {
 	if len(evt.Entries) == 0 {
 		return nil
@@ -447,7 +544,7 @@ func (b *Bridge[SI, DI]) applyAppend(ctx context.Context, evt MutationEvent) err
 
 func (b *Bridge[SI, DI]) applySetTags(ctx context.Context, evt MutationEvent) error {
 	if b.sinkLookup == nil {
-		b.logger.Warn("sink does not support SourceIDLookup, skipping set_tags", "stream", evt.Stream, "source_id", evt.EntryID)
+		b.logger.Warn("sink does not implement FindBySourceID, skipping set_tags", "stream", evt.Stream, "source_id", evt.EntryID)
 		return nil
 	}
 	sinkID, ok, err := b.sinkLookup.FindBySourceID(ctx, evt.Stream, evt.EntryID)
@@ -463,7 +560,7 @@ func (b *Bridge[SI, DI]) applySetTags(ctx context.Context, evt MutationEvent) er
 
 func (b *Bridge[SI, DI]) applySetAnnotations(ctx context.Context, evt MutationEvent) error {
 	if b.sinkLookup == nil {
-		b.logger.Warn("sink does not support SourceIDLookup, skipping set_annotations", "stream", evt.Stream, "source_id", evt.EntryID)
+		b.logger.Warn("sink does not implement FindBySourceID, skipping set_annotations", "stream", evt.Stream, "source_id", evt.EntryID)
 		return nil
 	}
 	sinkID, ok, err := b.sinkLookup.FindBySourceID(ctx, evt.Stream, evt.EntryID)
@@ -479,7 +576,7 @@ func (b *Bridge[SI, DI]) applySetAnnotations(ctx context.Context, evt MutationEv
 
 func (b *Bridge[SI, DI]) applyTrim(ctx context.Context, evt MutationEvent) error {
 	if b.sinkLookup == nil {
-		b.logger.Warn("sink does not support SourceIDLookup, skipping trim", "stream", evt.Stream, "source_id", evt.BeforeID)
+		b.logger.Warn("sink does not implement FindBySourceID, skipping trim", "stream", evt.Stream, "source_id", evt.BeforeID)
 		return nil
 	}
 	sinkID, ok, err := b.sinkLookup.FindBySourceID(ctx, evt.Stream, evt.BeforeID)
