@@ -137,7 +137,7 @@ func New(ctx context.Context, db *mongo.Database, opts ...Option) (*Store, error
 	if err := s.ensureIndexes(ctx); err != nil {
 		return nil, fmt.Errorf("ledger/mongodb: ensure indexes: %w", err)
 	}
-	go s.createAsyncIndexes(o.logger) // #nosec G118 -- background index creation intentionally outlives request context
+	go s.createAsyncIndexes(context.WithoutCancel(ctx), o.logger)
 	return s, nil
 }
 
@@ -163,7 +163,7 @@ func (s *Store) ensureIndexes(ctx context.Context) error {
 	return err
 }
 
-func (s *Store) createAsyncIndexes(logger *slog.Logger) {
+func (s *Store) createAsyncIndexes(ctx context.Context, logger *slog.Logger) {
 	if s.closed.Load() {
 		return
 	}
@@ -171,7 +171,7 @@ func (s *Store) createAsyncIndexes(logger *slog.Logger) {
 	model := mongo.IndexModel{
 		Keys: bson.D{{Key: "stream", Value: 1}, {Key: "tags", Value: 1}, {Key: "_id", Value: 1}},
 	}
-	if _, err := s.coll.Indexes().CreateOne(context.Background(), model); err != nil && !s.closed.Load() {
+	if _, err := s.coll.Indexes().CreateOne(ctx, model); err != nil && !s.closed.Load() {
 		logger.Warn("failed to create tags index", "error", err)
 	}
 }
