@@ -12,6 +12,7 @@ import (
 // Config holds the full ledger daemon configuration.
 type Config struct {
 	Listen        string       `yaml:"listen"`
+	HTTPListen    string       `yaml:"http_listen"`    // optional HTTP/REST gateway address; empty = disabled
 	LogFile       string       `yaml:"log_file"`
 	APIKey        string       `yaml:"api_key"`
 	AllowedStores []string     `yaml:"allowed_stores"` // optional allow-list of store names for the API key
@@ -97,6 +98,11 @@ func (c *Config) Validate() error {
 	}
 	if c.DB.Type == "" {
 		return fmt.Errorf("ledger: config: db.type must be set (e.g. sqlite, postgres)")
+	}
+	if c.HTTPListen != "" {
+		if _, _, err := net.SplitHostPort(c.HTTPListen); err != nil {
+			return fmt.Errorf("ledger: config: invalid http_listen address %q: %w", c.HTTPListen, err)
+		}
 	}
 	if c.TLS.Cert != "" && c.TLS.Key == "" {
 		return fmt.Errorf("ledger: config: tls.cert requires tls.key")

@@ -2,6 +2,7 @@ syntax = "proto3";
 
 package ledger.v1;
 
+import "google/api/annotations.proto";
 import "google/protobuf/timestamp.proto";
 
 option go_package = "github.com/rbaliyan/ledger/api/ledger/v1;ledgerv1";
@@ -16,47 +17,99 @@ service LedgerService {
   // Append adds entries to the named stream.
   // Entries whose DedupKey already exists in the stream are silently skipped.
   // Returns the IDs assigned to newly written entries (skipped entries are omitted).
-  rpc Append(AppendRequest) returns (AppendResponse);
+  rpc Append(AppendRequest) returns (AppendResponse) {
+    option (google.api.http) = {
+      post: "/v1/streams/{stream}/entries"
+      body: "*"
+    };
+  }
 
   // Read returns entries from the named stream, ordered by ID.
   // An empty stream returns an empty list (not an error).
-  rpc Read(ReadRequest) returns (ReadResponse);
+  // Query params: options.after, options.limit, options.desc, options.order_key, options.tag, options.all_tags.
+  rpc Read(ReadRequest) returns (ReadResponse) {
+    option (google.api.http) = {
+      get: "/v1/streams/{stream}/entries"
+    };
+  }
 
   // Count returns the total number of entries in the named stream.
-  rpc Count(CountRequest) returns (CountResponse);
+  rpc Count(CountRequest) returns (CountResponse) {
+    option (google.api.http) = {
+      get: "/v1/streams/{stream}/entries:count"
+    };
+  }
 
   // SetTags replaces all tags on an existing entry.
   // Returns NOT_FOUND if the entry does not exist.
-  rpc SetTags(SetTagsRequest) returns (SetTagsResponse);
+  rpc SetTags(SetTagsRequest) returns (SetTagsResponse) {
+    option (google.api.http) = {
+      put: "/v1/streams/{stream}/entries/{id}/tags"
+      body: "*"
+    };
+  }
 
   // SetAnnotations merges key-value annotations onto an existing entry.
   // Keys present in "set" are upserted; keys present in "delete" are removed.
   // Returns NOT_FOUND if the entry does not exist.
-  rpc SetAnnotations(SetAnnotationsRequest) returns (SetAnnotationsResponse);
+  rpc SetAnnotations(SetAnnotationsRequest) returns (SetAnnotationsResponse) {
+    option (google.api.http) = {
+      patch: "/v1/streams/{stream}/entries/{id}/annotations"
+      body: "*"
+    };
+  }
 
   // Trim deletes entries whose ID is less than or equal to before_id.
   // Returns the number of entries deleted.
-  rpc Trim(TrimRequest) returns (TrimResponse);
+  rpc Trim(TrimRequest) returns (TrimResponse) {
+    option (google.api.http) = {
+      post: "/v1/streams/{stream}/entries:trim"
+      body: "*"
+    };
+  }
 
   // ListStreamIDs returns distinct stream IDs that have at least one entry.
   // Streams that have been fully trimmed are not returned.
   // Results are ascending by stream ID and cursor-paginated via after / limit.
-  rpc ListStreamIDs(ListStreamIDsRequest) returns (ListStreamIDsResponse);
+  // Query params: after, limit.
+  rpc ListStreamIDs(ListStreamIDsRequest) returns (ListStreamIDsResponse) {
+    option (google.api.http) = {
+      get: "/v1/streams"
+    };
+  }
 
   // RenameStream changes the human-readable name of a stream without touching
   // its entries. Returns NOT_FOUND if the current name does not exist.
-  rpc RenameStream(RenameStreamRequest) returns (RenameStreamResponse);
+  rpc RenameStream(RenameStreamRequest) returns (RenameStreamResponse) {
+    option (google.api.http) = {
+      post: "/v1/streams/{name}:rename"
+      body: "*"
+    };
+  }
 
   // Stat returns metrics for a stream, including entry count and first/last entry IDs.
-  rpc Stat(StatRequest) returns (StatResponse);
+  rpc Stat(StatRequest) returns (StatResponse) {
+    option (google.api.http) = {
+      get: "/v1/streams/{stream}:stat"
+    };
+  }
 
   // Search performs a substring / full-text search on entry payloads.
   // Returns UNIMPLEMENTED if the backend does not support search.
-  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc Search(SearchRequest) returns (SearchResponse) {
+    option (google.api.http) = {
+      post: "/v1/streams/{stream}/entries:search"
+      body: "*"
+    };
+  }
 
   // Health reports backend connectivity. Returns status "ok" on success,
   // or a description of the problem on failure.
-  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Health(HealthRequest) returns (HealthResponse) {
+    option (google.api.http) = {
+      get: "/v1/health"
+    };
+  }
 }
 
 // ─── shared types ────────────────────────────────────────────────────────────

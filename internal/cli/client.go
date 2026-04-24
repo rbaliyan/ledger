@@ -34,6 +34,9 @@ func clientConfig() (*config.Config, error) {
 	if flagAddr != "" {
 		cfg.Listen = flagAddr
 	}
+	if flagHTTPAddr != "" {
+		cfg.HTTPListen = flagHTTPAddr
+	}
 	if flagAPIKey != "" {
 		cfg.APIKey = flagAPIKey
 	}

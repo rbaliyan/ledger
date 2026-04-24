@@ -9,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"sync"
 
@@ -25,6 +26,9 @@ type Server struct {
 	listener net.Listener
 	mux      *muxProvider
 	closer   io.Closer
+
+	httpServer   *http.Server   // nil when HTTP gateway is disabled
+	httpListener net.Listener   // nil when HTTP gateway is disabled
 
 	mu         sync.Mutex // protects hooks, hookCancel, and stopped
 	hooks      []*hookRunner
@@ -72,6 +76,26 @@ func New(ctx context.Context, cfg *config.Config) (*Server, error) {
 		hookCancel: hookCancel,
 	}
 
+	if cfg.HTTPListen != "" {
+		httpHandler, err := newGatewayHandler(ctx, ln.Addr().String(), cfg)
+		if err != nil {
+			hookCancel()
+			_ = ln.Close()
+			mux.Close(ctx)
+			return nil, fmt.Errorf("server: gateway: %w", err)
+		}
+		httpLn, err := net.Listen("tcp", cfg.HTTPListen)
+		if err != nil {
+			hookCancel()
+			_ = ln.Close()
+			mux.Close(ctx)
+			return nil, fmt.Errorf("server: http listen %s: %w", cfg.HTTPListen, err)
+		}
+		srv.httpServer = &http.Server{Handler: httpHandler}
+		srv.httpListener = httpLn
+		slog.Info("ledger HTTP gateway listening", "addr", httpLn.Addr().String())
+	}
+
 	for _, hcfg := range cfg.Hooks {
 		h, err := newHookRunner(hcfg, mux)
 		if err != nil {
@@ -87,8 +111,16 @@ func New(ctx context.Context, cfg *config.Config) (*Server, error) {
 	return srv, nil
 }
 
-// Addr returns the address the server is listening on.
+// Addr returns the gRPC address the server is listening on.
 func (s *Server) Addr() string { return s.listener.Addr().String() }
+
+// HTTPAddr returns the HTTP gateway address, or empty string if disabled.
+func (s *Server) HTTPAddr() string {
+	if s.httpListener == nil {
+		return ""
+	}
+	return s.httpListener.Addr().String()
+}
 
 // ReloadHooks cancels the current hook set, waits for them to stop, then
 // starts a new set from cfg.Hooks. The gRPC listener and backend connection
@@ -129,8 +161,15 @@ func (s *Server) ReloadHooks(cfg *config.Config) {
 	slog.Info("hooks reloaded", "count", len(hooks))
 }
 
-// Serve blocks until the server stops.
+// Serve starts the HTTP gateway (if configured) and blocks on the gRPC server.
 func (s *Server) Serve() error {
+	if s.httpServer != nil {
+		go func() {
+			if err := s.httpServer.Serve(s.httpListener); err != nil && err != http.ErrServerClosed {
+				slog.Warn("HTTP gateway stopped", "err", err)
+			}
+		}()
+	}
 	return s.grpc.Serve(s.listener)
 }
 
@@ -151,6 +190,11 @@ func (s *Server) Stop(ctx context.Context) {
 	}
 	for _, h := range hooks {
 		h.Wait()
+	}
+	if s.httpServer != nil {
+		if err := s.httpServer.Shutdown(ctx); err != nil {
+			slog.Warn("HTTP gateway shutdown error", "err", err)
+		}
 	}
 	s.grpc.GracefulStop()
 	s.mux.Close(ctx)
