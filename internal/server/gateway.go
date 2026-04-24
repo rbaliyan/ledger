@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -23,7 +24,10 @@ import (
 //
 // The x-ledger-store and x-api-key HTTP headers are forwarded as gRPC metadata
 // so the existing server-side auth interceptors handle authentication.
-func newGatewayHandler(ctx context.Context, grpcAddr string, cfg *config.Config) (http.Handler, error) {
+//
+// Note: bytes fields (e.g. Entry.payload) are base64-encoded in JSON responses
+// per the protobuf JSON mapping specification.
+func newGatewayHandler(grpcAddr string, cfg *config.Config) (http.Handler, error) {
 	dialOpts, err := gatewayDialOpts(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("gateway: dial options: %w", err)
@@ -32,7 +36,11 @@ func newGatewayHandler(ctx context.Context, grpcAddr string, cfg *config.Config)
 	mux := runtime.NewServeMux(
 		runtime.WithIncomingHeaderMatcher(gatewayHeaderMatcher),
 	)
-	if err := ledgerv1.RegisterLedgerServiceHandlerFromEndpoint(ctx, mux, grpcAddr, dialOpts); err != nil {
+	// Use context.Background so the loopback connection lives for the server's
+	// lifetime and is not affected by short-lived caller contexts.
+	if err := ledgerv1.RegisterLedgerServiceHandlerFromEndpoint(
+		context.Background(), mux, grpcAddr, dialOpts,
+	); err != nil {
 		return nil, fmt.Errorf("gateway: register: %w", err)
 	}
 	return mux, nil
@@ -42,10 +50,26 @@ func newGatewayHandler(ctx context.Context, grpcAddr string, cfg *config.Config)
 // metadata in addition to the default grpc-gateway headers.
 func gatewayHeaderMatcher(key string) (string, bool) {
 	switch strings.ToLower(key) {
-	case ledgerpb.StoreMetadataHeader, ledgerpb.APIKeyMetadataHeader:
-		return key, true
+	case ledgerpb.StoreMetadataHeader:
+		return ledgerpb.StoreMetadataHeader, true
+	case ledgerpb.APIKeyMetadataHeader:
+		return ledgerpb.APIKeyMetadataHeader, true
 	}
 	return runtime.DefaultHeaderMatcher(key)
+}
+
+// gatewayDialTarget returns the gRPC dial target for the loopback gateway
+// connection. When the bound address uses a wildcard host (0.0.0.0 or ::),
+// it is rewritten to 127.0.0.1 so traffic stays on the loopback interface.
+func gatewayDialTarget(boundAddr string) string {
+	host, port, err := net.SplitHostPort(boundAddr)
+	if err != nil {
+		return boundAddr
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, port)
 }
 
 // gatewayDialOpts builds the gRPC dial options for the gateway→gRPC loopback.

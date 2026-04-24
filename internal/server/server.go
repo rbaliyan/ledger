@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"database/sql"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"sync"
+	"time"
 
 	ledgerv1 "github.com/rbaliyan/ledger/api/ledger/v1"
 	"github.com/rbaliyan/ledger/internal/config"
@@ -77,7 +79,7 @@ func New(ctx context.Context, cfg *config.Config) (*Server, error) {
 	}
 
 	if cfg.HTTPListen != "" {
-		httpHandler, err := newGatewayHandler(ctx, ln.Addr().String(), cfg)
+		httpHandler, err := newGatewayHandler(gatewayDialTarget(ln.Addr().String()), cfg)
 		if err != nil {
 			hookCancel()
 			_ = ln.Close()
@@ -91,7 +93,11 @@ func New(ctx context.Context, cfg *config.Config) (*Server, error) {
 			mux.Close(ctx)
 			return nil, fmt.Errorf("server: http listen %s: %w", cfg.HTTPListen, err)
 		}
-		srv.httpServer = &http.Server{Handler: httpHandler}
+		srv.httpServer = &http.Server{
+			Handler:           httpHandler,
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       60 * time.Second,
+		}
 		srv.httpListener = httpLn
 		slog.Info("ledger HTTP gateway listening", "addr", httpLn.Addr().String())
 	}
@@ -101,6 +107,9 @@ func New(ctx context.Context, cfg *config.Config) (*Server, error) {
 		if err != nil {
 			hookCancel()
 			_ = ln.Close()
+			if srv.httpListener != nil {
+				_ = srv.httpListener.Close()
+			}
 			mux.Close(ctx)
 			return nil, fmt.Errorf("server: hook: %w", err)
 		}
@@ -161,16 +170,39 @@ func (s *Server) ReloadHooks(cfg *config.Config) {
 	slog.Info("hooks reloaded", "count", len(hooks))
 }
 
-// Serve starts the HTTP gateway (if configured) and blocks on the gRPC server.
+// Serve starts both the gRPC server and the HTTP gateway (if configured),
+// and returns the first error from either. Both servers are run in goroutines;
+// callers must call Stop to shut them down.
 func (s *Server) Serve() error {
+	errCh := make(chan error, 2)
+	n := 1
 	if s.httpServer != nil {
+		n = 2
 		go func() {
-			if err := s.httpServer.Serve(s.httpListener); err != nil && err != http.ErrServerClosed {
-				slog.Warn("HTTP gateway stopped", "err", err)
+			err := s.httpServer.Serve(s.httpListener)
+			if errors.Is(err, http.ErrServerClosed) {
+				err = nil
+			}
+			errCh <- err
+		}()
+	}
+	go func() {
+		err := s.grpc.Serve(s.listener)
+		if errors.Is(err, grpc.ErrServerStopped) {
+			err = nil
+		}
+		errCh <- err
+	}()
+	first := <-errCh
+	// Drain the second goroutine's result so it never blocks; log unexpected errors.
+	if n == 2 {
+		go func() {
+			if err := <-errCh; err != nil {
+				slog.Warn("server stopped with error", "err", err)
 			}
 		}()
 	}
-	return s.grpc.Serve(s.listener)
+	return first
 }
 
 // Stop gracefully drains in-flight RPCs, stops hook runners, then closes
