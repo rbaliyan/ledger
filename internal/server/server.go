@@ -107,6 +107,9 @@ func New(ctx context.Context, cfg *config.Config) (*Server, error) {
 		if err != nil {
 			hookCancel()
 			_ = ln.Close()
+			if srv.httpListener != nil {
+				_ = srv.httpListener.Close()
+			}
 			mux.Close(ctx)
 			return nil, fmt.Errorf("server: hook: %w", err)
 		}
@@ -172,7 +175,9 @@ func (s *Server) ReloadHooks(cfg *config.Config) {
 // callers must call Stop to shut them down.
 func (s *Server) Serve() error {
 	errCh := make(chan error, 2)
+	n := 1
 	if s.httpServer != nil {
+		n = 2
 		go func() {
 			err := s.httpServer.Serve(s.httpListener)
 			if errors.Is(err, http.ErrServerClosed) {
@@ -181,8 +186,23 @@ func (s *Server) Serve() error {
 			errCh <- err
 		}()
 	}
-	go func() { errCh <- s.grpc.Serve(s.listener) }()
-	return <-errCh
+	go func() {
+		err := s.grpc.Serve(s.listener)
+		if errors.Is(err, grpc.ErrServerStopped) {
+			err = nil
+		}
+		errCh <- err
+	}()
+	first := <-errCh
+	// Drain the second goroutine's result so it never blocks; log unexpected errors.
+	if n == 2 {
+		go func() {
+			if err := <-errCh; err != nil {
+				slog.Warn("server stopped with error", "err", err)
+			}
+		}()
+	}
+	return first
 }
 
 // Stop gracefully drains in-flight RPCs, stops hook runners, then closes

@@ -305,6 +305,8 @@ listen: %q
 # Optional: enable the HTTP/REST gateway on a separate port.
 # When set, REST clients can call all gRPC methods via JSON over HTTP.
 # Requires the x-ledger-store and x-api-key HTTP headers (same as gRPC).
+# Note: the gateway serves plain HTTP even when gRPC is configured with TLS.
+#   Use a reverse proxy (nginx, Caddy) in front if HTTPS termination is needed.
 # Note: bytes fields (e.g. payload) are base64-encoded in JSON responses.
 # Note: changing this value requires a full restart (SIGHUP only reloads hooks).
 # http_listen: "localhost:8080"
