@@ -244,12 +244,13 @@ func readOptionsFromProto(p *ledgerv1.ReadOptions) ReadOptions {
 		return ReadOptions{}
 	}
 	return ReadOptions{
-		After:    p.After,
-		Limit:    int(p.Limit), //nolint:gosec // proto int64 fits in int
-		Desc:     p.Desc,
-		OrderKey: p.OrderKey,
-		Tag:      p.Tag,
-		AllTags:  p.AllTags,
+		After:           p.After,
+		Limit:           int(p.Limit), //nolint:gosec // proto int64 fits in int
+		Desc:            p.Desc,
+		OrderKey:        p.OrderKey,
+		Tag:             p.Tag,
+		AllTags:         p.AllTags,
+		MetadataFilters: p.MetadataFilters,
 	}
 }
 

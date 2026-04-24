@@ -23,12 +23,13 @@ const (
 // It mirrors ledger.ReadOptions but uses plain Go values instead of functional
 // options so adapters can inspect the cursor without type assertions.
 type ReadOptions struct {
-	After    string   // cursor: only entries with ID > After are returned; "" means start
-	Limit    int      // 0 means backend default (100)
-	Desc     bool     // newest-first when true
-	OrderKey string   // filter by order_key field
-	Tag      string   // filter entries that carry this single tag
-	AllTags  []string // filter entries that carry ALL of these tags
+	After           string            // cursor: only entries with ID > After are returned; "" means start
+	Limit           int               // 0 means backend default (100)
+	Desc            bool              // newest-first when true
+	OrderKey        string            // filter by order_key field
+	Tag             string            // filter entries that carry this single tag
+	AllTags         []string          // filter entries that carry ALL of these tags
+	MetadataFilters map[string]string // filter entries whose metadata contains all key-value pairs (ANDed)
 }
 
 // InputEntry is a single entry to be appended to a stream.

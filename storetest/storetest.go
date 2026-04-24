@@ -418,6 +418,58 @@ func RunStoreTests[I comparable, P any](t *testing.T, store ledger.Store[I, P], 
 		}
 	})
 
+	t.Run("WithMetadataKeyFilter", func(t *testing.T) {
+		for _, meta := range []map[string]string{
+			{"source": "producer-a", "env": "prod"},
+			{"source": "producer-b", "env": "prod"},
+			{"source": "producer-a", "env": "staging"},
+		} {
+			if _, err := store.Append(ctx, "test-meta-filter", ledger.RawEntry[P]{
+				Payload:  cfg.SamplePayload,
+				Metadata: meta,
+			}); err != nil {
+				t.Fatalf("append: %v", err)
+			}
+		}
+
+		entries, err := store.Read(ctx, "test-meta-filter", ledger.WithMetadataKey("source", "producer-a"))
+		if err != nil {
+			t.Fatalf("WithMetadataKey: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Errorf("WithMetadataKey(source=producer-a): got %d, want 2", len(entries))
+		}
+
+		entries, err = store.Read(ctx, "test-meta-filter", ledger.WithMetadataKey("env", "prod"))
+		if err != nil {
+			t.Fatalf("WithMetadataKey env: %v", err)
+		}
+		if len(entries) != 2 {
+			t.Errorf("WithMetadataKey(env=prod): got %d, want 2", len(entries))
+		}
+
+		// AND: both conditions, only one entry matches
+		entries, err = store.Read(ctx, "test-meta-filter",
+			ledger.WithMetadataKey("source", "producer-a"),
+			ledger.WithMetadataKey("env", "prod"),
+		)
+		if err != nil {
+			t.Fatalf("WithMetadataKey AND: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Errorf("WithMetadataKey AND: got %d, want 1", len(entries))
+		}
+
+		// Non-matching value returns empty
+		entries, err = store.Read(ctx, "test-meta-filter", ledger.WithMetadataKey("source", "producer-c"))
+		if err != nil {
+			t.Fatalf("WithMetadataKey no match: %v", err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("WithMetadataKey(source=producer-c): got %d, want 0", len(entries))
+		}
+	})
+
 	// Stream-name prefix chosen so these streams sort after all other test streams
 	// in this suite, allowing ListStreamIDs tests to isolate their results via cursor.
 	const listPrefix = "zzz-list-"

@@ -281,10 +281,7 @@ func WithAllTags(tags ...string) ReadOption {
 
 // WithMetadataKey returns a ReadOption that filters entries whose metadata map
 // contains the given key with the given value. Multiple calls are ANDed.
-//
-// Only the PostgreSQL backend implements this filter. SQLite, MongoDB, and
-// ClickHouse backends silently ignore it (no error is returned by the library
-// layer; backend-specific checking is the caller's responsibility).
+// All backends (SQLite, PostgreSQL, MongoDB, ClickHouse) support this filter.
 func WithMetadataKey(key, value string) ReadOption {
 	return func(o *ReadOptions) {
 		o.metadataFilters = append(o.metadataFilters, metadataKV{Key: key, Value: value})

@@ -196,6 +196,10 @@ message ReadOptions {
 
   // all_tags filters entries that carry ALL of the specified tags.
   repeated string all_tags = 6;
+
+  // metadata_filters filters entries whose metadata map contains all of the
+  // given key-value pairs. Pairs are ANDed together.
+  map<string, string> metadata_filters = 7;
 }
 
 // ─── Append ──────────────────────────────────────────────────────────────────

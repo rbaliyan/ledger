@@ -308,6 +308,9 @@ func (o ReadOptions) commonOpts() []ledger.ReadOption {
 	if len(o.AllTags) > 0 {
 		opts = append(opts, ledger.WithAllTags(o.AllTags...))
 	}
+	for k, v := range o.MetadataFilters {
+		opts = append(opts, ledger.WithMetadataKey(k, v))
+	}
 	return opts
 }
 

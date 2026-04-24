@@ -381,6 +381,10 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 		clauses = append(clauses, "EXISTS (SELECT 1 FROM json_each(tags) WHERE json_each.value = ?)")
 		args = append(args, tag)
 	}
+	for _, kv := range o.MetadataFilters() {
+		clauses = append(clauses, "EXISTS (SELECT 1 FROM json_each(metadata) WHERE json_each.key = ? AND json_each.value = ?)")
+		args = append(args, kv.Key, kv.Value)
+	}
 
 	dir := "ASC"
 	if o.Order() == ledger.Descending {
