@@ -200,6 +200,11 @@ message ReadOptions {
   // metadata_filters filters entries whose metadata map contains all of the
   // given key-value pairs. Pairs are ANDed together.
   map<string, string> metadata_filters = 7;
+
+  // annotation_filters filters entries whose annotations map contains all of
+  // the given key-value pairs. Pairs are ANDed together.
+  // Not supported by ClickHouse (returns UNIMPLEMENTED).
+  map<string, string> annotation_filters = 8;
 }
 
 // ─── Append ──────────────────────────────────────────────────────────────────

@@ -186,7 +186,8 @@ type ReadOptions struct {
 	order           Order
 	tag             string
 	allTags         []string
-	metadataFilters []metadataKV
+	metadataFilters    []metadataKV
+	annotationFilters  []metadataKV
 }
 
 // Limit returns the maximum number of entries to return.
@@ -208,8 +209,11 @@ func (o ReadOptions) Tag() string { return o.tag }
 func (o ReadOptions) AllTags() []string { return o.allTags }
 
 // MetadataFilters returns the metadata key-value filters, or nil if not set.
-// Currently only supported by the PostgreSQL backend.
 func (o ReadOptions) MetadataFilters() []metadataKV { return o.metadataFilters }
+
+// AnnotationFilters returns the annotation key-value filters, or nil if not set.
+// ClickHouse returns [ErrNotSupported] when any filters are present.
+func (o ReadOptions) AnnotationFilters() []metadataKV { return o.annotationFilters }
 
 func defaultReadOptions() ReadOptions {
 	return ReadOptions{
@@ -285,6 +289,16 @@ func WithAllTags(tags ...string) ReadOption {
 func WithMetadataKey(key, value string) ReadOption {
 	return func(o *ReadOptions) {
 		o.metadataFilters = append(o.metadataFilters, metadataKV{Key: key, Value: value})
+	}
+}
+
+// WithAnnotation returns a ReadOption that filters entries whose annotations map
+// contains the given key with the given value. Multiple calls are ANDed.
+// SQLite, PostgreSQL, and MongoDB support this filter.
+// ClickHouse always returns [ErrNotSupported] when this filter is used.
+func WithAnnotation(key, value string) ReadOption {
+	return func(o *ReadOptions) {
+		o.annotationFilters = append(o.annotationFilters, metadataKV{Key: key, Value: value})
 	}
 }
 

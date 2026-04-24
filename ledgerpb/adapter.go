@@ -311,6 +311,9 @@ func (o ReadOptions) commonOpts() []ledger.ReadOption {
 	for k, v := range o.MetadataFilters {
 		opts = append(opts, ledger.WithMetadataKey(k, v))
 	}
+	for k, v := range o.AnnotationFilters {
+		opts = append(opts, ledger.WithAnnotation(k, v))
+	}
 	return opts
 }
 

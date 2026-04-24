@@ -275,8 +275,12 @@ type ReadOptions struct {
 	// metadata_filters filters entries whose metadata map contains all of the
 	// given key-value pairs. Pairs are ANDed together.
 	MetadataFilters map[string]string `protobuf:"bytes,7,rep,name=metadata_filters,json=metadataFilters,proto3" json:"metadata_filters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// annotation_filters filters entries whose annotations map contains all of
+	// the given key-value pairs. Pairs are ANDed together.
+	// Not supported by ClickHouse (returns UNIMPLEMENTED).
+	AnnotationFilters map[string]string `protobuf:"bytes,8,rep,name=annotation_filters,json=annotationFilters,proto3" json:"annotation_filters,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *ReadOptions) Reset() {
@@ -354,6 +358,13 @@ func (x *ReadOptions) GetAllTags() []string {
 func (x *ReadOptions) GetMetadataFilters() map[string]string {
 	if x != nil {
 		return x.MetadataFilters
+	}
+	return nil
+}
+
+func (x *ReadOptions) GetAnnotationFilters() map[string]string {
+	if x != nil {
+		return x.AnnotationFilters
 	}
 	return nil
 }
@@ -1476,7 +1487,7 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a>\n" +
 	"\x10AnnotationsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb3\x02\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xd7\x03\n" +
 	"\vReadOptions\x12\x14\n" +
 	"\x05after\x18\x01 \x01(\tR\x05after\x12\x14\n" +
 	"\x05limit\x18\x02 \x01(\x03R\x05limit\x12\x12\n" +
@@ -1484,8 +1495,12 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\torder_key\x18\x04 \x01(\tR\borderKey\x12\x10\n" +
 	"\x03tag\x18\x05 \x01(\tR\x03tag\x12\x19\n" +
 	"\ball_tags\x18\x06 \x03(\tR\aallTags\x12V\n" +
-	"\x10metadata_filters\x18\a \x03(\v2+.ledger.v1.ReadOptions.MetadataFiltersEntryR\x0fmetadataFilters\x1aB\n" +
+	"\x10metadata_filters\x18\a \x03(\v2+.ledger.v1.ReadOptions.MetadataFiltersEntryR\x0fmetadataFilters\x12\\\n" +
+	"\x12annotation_filters\x18\b \x03(\v2-.ledger.v1.ReadOptions.AnnotationFiltersEntryR\x11annotationFilters\x1aB\n" +
 	"\x14MetadataFiltersEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1aD\n" +
+	"\x16AnnotationFiltersEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"X\n" +
 	"\rAppendRequest\x12\x16\n" +
@@ -1573,7 +1588,7 @@ func file_ledger_v1_ledger_proto_rawDescGZIP() []byte {
 	return file_ledger_v1_ledger_proto_rawDescData
 }
 
-var file_ledger_v1_ledger_proto_msgTypes = make([]protoimpl.MessageInfo, 30)
+var file_ledger_v1_ledger_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
 var file_ledger_v1_ledger_proto_goTypes = []any{
 	(*EntryInput)(nil),             // 0: ledger.v1.EntryInput
 	(*Entry)(nil),                  // 1: ledger.v1.Entry
@@ -1604,49 +1619,51 @@ var file_ledger_v1_ledger_proto_goTypes = []any{
 	nil,                            // 26: ledger.v1.Entry.MetadataEntry
 	nil,                            // 27: ledger.v1.Entry.AnnotationsEntry
 	nil,                            // 28: ledger.v1.ReadOptions.MetadataFiltersEntry
-	nil,                            // 29: ledger.v1.SetAnnotationsRequest.SetEntry
-	(*timestamppb.Timestamp)(nil),  // 30: google.protobuf.Timestamp
+	nil,                            // 29: ledger.v1.ReadOptions.AnnotationFiltersEntry
+	nil,                            // 30: ledger.v1.SetAnnotationsRequest.SetEntry
+	(*timestamppb.Timestamp)(nil),  // 31: google.protobuf.Timestamp
 }
 var file_ledger_v1_ledger_proto_depIdxs = []int32{
 	25, // 0: ledger.v1.EntryInput.metadata:type_name -> ledger.v1.EntryInput.MetadataEntry
 	26, // 1: ledger.v1.Entry.metadata:type_name -> ledger.v1.Entry.MetadataEntry
 	27, // 2: ledger.v1.Entry.annotations:type_name -> ledger.v1.Entry.AnnotationsEntry
-	30, // 3: ledger.v1.Entry.created_at:type_name -> google.protobuf.Timestamp
-	30, // 4: ledger.v1.Entry.updated_at:type_name -> google.protobuf.Timestamp
+	31, // 3: ledger.v1.Entry.created_at:type_name -> google.protobuf.Timestamp
+	31, // 4: ledger.v1.Entry.updated_at:type_name -> google.protobuf.Timestamp
 	28, // 5: ledger.v1.ReadOptions.metadata_filters:type_name -> ledger.v1.ReadOptions.MetadataFiltersEntry
-	0,  // 6: ledger.v1.AppendRequest.entries:type_name -> ledger.v1.EntryInput
-	2,  // 7: ledger.v1.ReadRequest.options:type_name -> ledger.v1.ReadOptions
-	1,  // 8: ledger.v1.ReadResponse.entries:type_name -> ledger.v1.Entry
-	29, // 9: ledger.v1.SetAnnotationsRequest.set:type_name -> ledger.v1.SetAnnotationsRequest.SetEntry
-	2,  // 10: ledger.v1.SearchRequest.options:type_name -> ledger.v1.ReadOptions
-	1,  // 11: ledger.v1.SearchResponse.entries:type_name -> ledger.v1.Entry
-	3,  // 12: ledger.v1.LedgerService.Append:input_type -> ledger.v1.AppendRequest
-	5,  // 13: ledger.v1.LedgerService.Read:input_type -> ledger.v1.ReadRequest
-	7,  // 14: ledger.v1.LedgerService.Count:input_type -> ledger.v1.CountRequest
-	9,  // 15: ledger.v1.LedgerService.SetTags:input_type -> ledger.v1.SetTagsRequest
-	11, // 16: ledger.v1.LedgerService.SetAnnotations:input_type -> ledger.v1.SetAnnotationsRequest
-	13, // 17: ledger.v1.LedgerService.Trim:input_type -> ledger.v1.TrimRequest
-	15, // 18: ledger.v1.LedgerService.ListStreamIDs:input_type -> ledger.v1.ListStreamIDsRequest
-	17, // 19: ledger.v1.LedgerService.RenameStream:input_type -> ledger.v1.RenameStreamRequest
-	19, // 20: ledger.v1.LedgerService.Stat:input_type -> ledger.v1.StatRequest
-	21, // 21: ledger.v1.LedgerService.Search:input_type -> ledger.v1.SearchRequest
-	23, // 22: ledger.v1.LedgerService.Health:input_type -> ledger.v1.HealthRequest
-	4,  // 23: ledger.v1.LedgerService.Append:output_type -> ledger.v1.AppendResponse
-	6,  // 24: ledger.v1.LedgerService.Read:output_type -> ledger.v1.ReadResponse
-	8,  // 25: ledger.v1.LedgerService.Count:output_type -> ledger.v1.CountResponse
-	10, // 26: ledger.v1.LedgerService.SetTags:output_type -> ledger.v1.SetTagsResponse
-	12, // 27: ledger.v1.LedgerService.SetAnnotations:output_type -> ledger.v1.SetAnnotationsResponse
-	14, // 28: ledger.v1.LedgerService.Trim:output_type -> ledger.v1.TrimResponse
-	16, // 29: ledger.v1.LedgerService.ListStreamIDs:output_type -> ledger.v1.ListStreamIDsResponse
-	18, // 30: ledger.v1.LedgerService.RenameStream:output_type -> ledger.v1.RenameStreamResponse
-	20, // 31: ledger.v1.LedgerService.Stat:output_type -> ledger.v1.StatResponse
-	22, // 32: ledger.v1.LedgerService.Search:output_type -> ledger.v1.SearchResponse
-	24, // 33: ledger.v1.LedgerService.Health:output_type -> ledger.v1.HealthResponse
-	23, // [23:34] is the sub-list for method output_type
-	12, // [12:23] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	29, // 6: ledger.v1.ReadOptions.annotation_filters:type_name -> ledger.v1.ReadOptions.AnnotationFiltersEntry
+	0,  // 7: ledger.v1.AppendRequest.entries:type_name -> ledger.v1.EntryInput
+	2,  // 8: ledger.v1.ReadRequest.options:type_name -> ledger.v1.ReadOptions
+	1,  // 9: ledger.v1.ReadResponse.entries:type_name -> ledger.v1.Entry
+	30, // 10: ledger.v1.SetAnnotationsRequest.set:type_name -> ledger.v1.SetAnnotationsRequest.SetEntry
+	2,  // 11: ledger.v1.SearchRequest.options:type_name -> ledger.v1.ReadOptions
+	1,  // 12: ledger.v1.SearchResponse.entries:type_name -> ledger.v1.Entry
+	3,  // 13: ledger.v1.LedgerService.Append:input_type -> ledger.v1.AppendRequest
+	5,  // 14: ledger.v1.LedgerService.Read:input_type -> ledger.v1.ReadRequest
+	7,  // 15: ledger.v1.LedgerService.Count:input_type -> ledger.v1.CountRequest
+	9,  // 16: ledger.v1.LedgerService.SetTags:input_type -> ledger.v1.SetTagsRequest
+	11, // 17: ledger.v1.LedgerService.SetAnnotations:input_type -> ledger.v1.SetAnnotationsRequest
+	13, // 18: ledger.v1.LedgerService.Trim:input_type -> ledger.v1.TrimRequest
+	15, // 19: ledger.v1.LedgerService.ListStreamIDs:input_type -> ledger.v1.ListStreamIDsRequest
+	17, // 20: ledger.v1.LedgerService.RenameStream:input_type -> ledger.v1.RenameStreamRequest
+	19, // 21: ledger.v1.LedgerService.Stat:input_type -> ledger.v1.StatRequest
+	21, // 22: ledger.v1.LedgerService.Search:input_type -> ledger.v1.SearchRequest
+	23, // 23: ledger.v1.LedgerService.Health:input_type -> ledger.v1.HealthRequest
+	4,  // 24: ledger.v1.LedgerService.Append:output_type -> ledger.v1.AppendResponse
+	6,  // 25: ledger.v1.LedgerService.Read:output_type -> ledger.v1.ReadResponse
+	8,  // 26: ledger.v1.LedgerService.Count:output_type -> ledger.v1.CountResponse
+	10, // 27: ledger.v1.LedgerService.SetTags:output_type -> ledger.v1.SetTagsResponse
+	12, // 28: ledger.v1.LedgerService.SetAnnotations:output_type -> ledger.v1.SetAnnotationsResponse
+	14, // 29: ledger.v1.LedgerService.Trim:output_type -> ledger.v1.TrimResponse
+	16, // 30: ledger.v1.LedgerService.ListStreamIDs:output_type -> ledger.v1.ListStreamIDsResponse
+	18, // 31: ledger.v1.LedgerService.RenameStream:output_type -> ledger.v1.RenameStreamResponse
+	20, // 32: ledger.v1.LedgerService.Stat:output_type -> ledger.v1.StatResponse
+	22, // 33: ledger.v1.LedgerService.Search:output_type -> ledger.v1.SearchResponse
+	24, // 34: ledger.v1.LedgerService.Health:output_type -> ledger.v1.HealthResponse
+	24, // [24:35] is the sub-list for method output_type
+	13, // [13:24] is the sub-list for method input_type
+	13, // [13:13] is the sub-list for extension type_name
+	13, // [13:13] is the sub-list for extension extendee
+	0,  // [0:13] is the sub-list for field type_name
 }
 
 func init() { file_ledger_v1_ledger_proto_init() }
@@ -1660,7 +1677,7 @@ func file_ledger_v1_ledger_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_ledger_v1_ledger_proto_rawDesc), len(file_ledger_v1_ledger_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   30,
+			NumMessages:   31,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

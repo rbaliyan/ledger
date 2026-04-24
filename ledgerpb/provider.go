@@ -29,7 +29,8 @@ type ReadOptions struct {
 	OrderKey        string            // filter by order_key field
 	Tag             string            // filter entries that carry this single tag
 	AllTags         []string          // filter entries that carry ALL of these tags
-	MetadataFilters map[string]string // filter entries whose metadata contains all key-value pairs (ANDed)
+	MetadataFilters    map[string]string // filter entries whose metadata contains all key-value pairs (ANDed)
+	AnnotationFilters  map[string]string // filter entries whose annotations contain all key-value pairs (ANDed); ClickHouse returns ErrNotSupported
 }
 
 // InputEntry is a single entry to be appended to a stream.

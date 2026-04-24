@@ -380,6 +380,12 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 		kvJSON, _ := json.Marshal(map[string]string{kv.Key: kv.Value})
 		args = append(args, string(kvJSON))
 	}
+	for _, kv := range o.AnnotationFilters() {
+		argN++
+		clauses = append(clauses, fmt.Sprintf("annotations @> $%d::jsonb", argN))
+		kvJSON, _ := json.Marshal(map[string]string{kv.Key: kv.Value})
+		args = append(args, string(kvJSON))
+	}
 
 	dir := "ASC"
 	if o.Order() == ledger.Descending {
