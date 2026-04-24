@@ -332,6 +332,9 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 	if allTags := o.AllTags(); len(allTags) > 0 {
 		filter = append(filter, bson.E{Key: "tags", Value: bson.D{{Key: "$all", Value: allTags}}})
 	}
+	for _, kv := range o.MetadataFilters() {
+		filter = append(filter, bson.E{Key: "metadata." + kv.Key, Value: kv.Value})
+	}
 
 	sortDir := 1
 	if o.Order() == ledger.Descending {

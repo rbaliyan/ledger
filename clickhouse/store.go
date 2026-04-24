@@ -236,6 +236,10 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 		sb.WriteString(" AND has(JSONExtractArrayRaw(tags), ?)")
 		args = append(args, fmt.Sprintf(`"%s"`, tag))
 	}
+	for _, kv := range o.MetadataFilters() {
+		sb.WriteString(" AND JSONExtractString(metadata, ?) = ?")
+		args = append(args, kv.Key, kv.Value)
+	}
 
 	if o.Order() == ledger.Descending {
 		sb.WriteString(" ORDER BY id DESC")
