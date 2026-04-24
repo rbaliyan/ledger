@@ -240,6 +240,9 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 		sb.WriteString(" AND JSONExtractString(metadata, ?) = ?")
 		args = append(args, kv.Key, kv.Value)
 	}
+	if len(o.AnnotationFilters()) > 0 {
+		return nil, ledger.ErrNotSupported
+	}
 
 	if o.Order() == ledger.Descending {
 		sb.WriteString(" ORDER BY id DESC")

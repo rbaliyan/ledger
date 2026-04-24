@@ -335,6 +335,9 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 	for _, kv := range o.MetadataFilters() {
 		filter = append(filter, bson.E{Key: "metadata." + kv.Key, Value: kv.Value})
 	}
+	for _, kv := range o.AnnotationFilters() {
+		filter = append(filter, bson.E{Key: "annotations." + kv.Key, Value: kv.Value})
+	}
 
 	sortDir := 1
 	if o.Order() == ledger.Descending {

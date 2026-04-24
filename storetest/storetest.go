@@ -470,6 +470,52 @@ func RunStoreTests[I comparable, P any](t *testing.T, store ledger.Store[I, P], 
 		}
 	})
 
+	t.Run("WithAnnotationFilter", func(t *testing.T) {
+		ids, err := store.Append(ctx, "test-annot-filter",
+			ledger.RawEntry[P]{Payload: cfg.SamplePayload},
+			ledger.RawEntry[P]{Payload: cfg.SamplePayload},
+		)
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+
+		v1, v2 := "processed", "pending"
+		if err := store.SetAnnotations(ctx, "test-annot-filter", ids[0], map[string]*string{"status": &v1}); err != nil {
+			if errors.Is(err, ledger.ErrNotSupported) {
+				t.Skip("backend does not support annotations")
+			}
+			t.Fatalf("SetAnnotations: %v", err)
+		}
+		if err := store.SetAnnotations(ctx, "test-annot-filter", ids[1], map[string]*string{"status": &v2}); err != nil {
+			t.Fatalf("SetAnnotations id[1]: %v", err)
+		}
+
+		entries, err := store.Read(ctx, "test-annot-filter", ledger.WithAnnotation("status", "processed"))
+		if err != nil {
+			t.Fatalf("WithAnnotation: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Errorf("WithAnnotation(status=processed): got %d, want 1", len(entries))
+		}
+
+		entries, err = store.Read(ctx, "test-annot-filter", ledger.WithAnnotation("status", "pending"))
+		if err != nil {
+			t.Fatalf("WithAnnotation pending: %v", err)
+		}
+		if len(entries) != 1 {
+			t.Errorf("WithAnnotation(status=pending): got %d, want 1", len(entries))
+		}
+
+		// Non-matching value returns empty.
+		entries, err = store.Read(ctx, "test-annot-filter", ledger.WithAnnotation("status", "unknown"))
+		if err != nil {
+			t.Fatalf("WithAnnotation no match: %v", err)
+		}
+		if len(entries) != 0 {
+			t.Errorf("WithAnnotation(status=unknown): got %d, want 0", len(entries))
+		}
+	})
+
 	// Stream-name prefix chosen so these streams sort after all other test streams
 	// in this suite, allowing ListStreamIDs tests to isolate their results via cursor.
 	const listPrefix = "zzz-list-"

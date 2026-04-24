@@ -250,7 +250,8 @@ func readOptionsFromProto(p *ledgerv1.ReadOptions) ReadOptions {
 		OrderKey:        p.OrderKey,
 		Tag:             p.Tag,
 		AllTags:         p.AllTags,
-		MetadataFilters: p.MetadataFilters,
+		MetadataFilters:   p.MetadataFilters,
+		AnnotationFilters: p.AnnotationFilters,
 	}
 }
 
