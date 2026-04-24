@@ -38,8 +38,10 @@ const (
 //
 // LedgerService exposes the append-only log operations over gRPC.
 //
-// A server instance is bound to exactly one store (table / collection).
-// Within that store, streams are identified by the "stream" field in each request.
+// Every request must carry the "x-ledger-store" gRPC metadata header, which
+// selects the target store (table / collection). The server routes each call
+// to the appropriate backend based on this header. Within a store, individual
+// log instances are identified by the "stream" field in each request.
 type LedgerServiceClient interface {
 	// Append adds entries to the named stream.
 	// Entries whose DedupKey already exists in the stream are silently skipped.
@@ -47,6 +49,7 @@ type LedgerServiceClient interface {
 	Append(ctx context.Context, in *AppendRequest, opts ...grpc.CallOption) (*AppendResponse, error)
 	// Read returns entries from the named stream, ordered by ID.
 	// An empty stream returns an empty list (not an error).
+	// Query params: options.after, options.limit, options.desc, options.order_key, options.tag, options.all_tags.
 	Read(ctx context.Context, in *ReadRequest, opts ...grpc.CallOption) (*ReadResponse, error)
 	// Count returns the total number of entries in the named stream.
 	Count(ctx context.Context, in *CountRequest, opts ...grpc.CallOption) (*CountResponse, error)
@@ -63,6 +66,7 @@ type LedgerServiceClient interface {
 	// ListStreamIDs returns distinct stream IDs that have at least one entry.
 	// Streams that have been fully trimmed are not returned.
 	// Results are ascending by stream ID and cursor-paginated via after / limit.
+	// Query params: after, limit.
 	ListStreamIDs(ctx context.Context, in *ListStreamIDsRequest, opts ...grpc.CallOption) (*ListStreamIDsResponse, error)
 	// RenameStream changes the human-readable name of a stream without touching
 	// its entries. Returns NOT_FOUND if the current name does not exist.
@@ -201,8 +205,10 @@ func (c *ledgerServiceClient) Health(ctx context.Context, in *HealthRequest, opt
 //
 // LedgerService exposes the append-only log operations over gRPC.
 //
-// A server instance is bound to exactly one store (table / collection).
-// Within that store, streams are identified by the "stream" field in each request.
+// Every request must carry the "x-ledger-store" gRPC metadata header, which
+// selects the target store (table / collection). The server routes each call
+// to the appropriate backend based on this header. Within a store, individual
+// log instances are identified by the "stream" field in each request.
 type LedgerServiceServer interface {
 	// Append adds entries to the named stream.
 	// Entries whose DedupKey already exists in the stream are silently skipped.
@@ -210,6 +216,7 @@ type LedgerServiceServer interface {
 	Append(context.Context, *AppendRequest) (*AppendResponse, error)
 	// Read returns entries from the named stream, ordered by ID.
 	// An empty stream returns an empty list (not an error).
+	// Query params: options.after, options.limit, options.desc, options.order_key, options.tag, options.all_tags.
 	Read(context.Context, *ReadRequest) (*ReadResponse, error)
 	// Count returns the total number of entries in the named stream.
 	Count(context.Context, *CountRequest) (*CountResponse, error)
@@ -226,6 +233,7 @@ type LedgerServiceServer interface {
 	// ListStreamIDs returns distinct stream IDs that have at least one entry.
 	// Streams that have been fully trimmed are not returned.
 	// Results are ascending by stream ID and cursor-paginated via after / limit.
+	// Query params: after, limit.
 	ListStreamIDs(context.Context, *ListStreamIDsRequest) (*ListStreamIDsResponse, error)
 	// RenameStream changes the human-readable name of a stream without touching
 	// its entries. Returns NOT_FOUND if the current name does not exist.

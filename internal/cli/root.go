@@ -5,9 +5,10 @@ import (
 )
 
 var (
-	flagConfig string
-	flagAPIKey string
-	flagAddr   string
+	flagConfig   string
+	flagAPIKey   string
+	flagAddr     string
+	flagHTTPAddr string
 )
 
 // Root returns the top-level cobra command.
@@ -27,7 +28,8 @@ Stream subcommands let you append, read, tag, annotate, trim, and tail streams.`
 
 	root.PersistentFlags().StringVarP(&flagConfig, "config", "c", "", "config file path (default: ~/.ledger/config.yaml)")
 	root.PersistentFlags().StringVar(&flagAPIKey, "api-key", "", "API key for authentication (overrides config)")
-	root.PersistentFlags().StringVar(&flagAddr, "addr", "", "daemon address (overrides config listen address)")
+	root.PersistentFlags().StringVar(&flagAddr, "addr", "", "daemon gRPC address (overrides config listen address)")
+	root.PersistentFlags().StringVar(&flagHTTPAddr, "http-addr", "", "daemon HTTP gateway address (overrides config http_listen)")
 
 	root.AddCommand(
 		newVersionCmd(),

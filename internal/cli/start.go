@@ -213,6 +213,9 @@ func startBackground(cmd *cobra.Command, cfg *config.Config) error {
 	if flagAddr != "" {
 		args = append(args, "--addr", flagAddr)
 	}
+	if flagHTTPAddr != "" {
+		args = append(args, "--http-addr", flagHTTPAddr)
+	}
 	// API key is passed via environment, not argv, to avoid exposure in `ps` output.
 	env := os.Environ()
 	if flagAPIKey != "" {
@@ -298,6 +301,11 @@ func writeDefaultConfig(cfg *config.Config) error {
 
 # Address the gRPC server listens on.
 listen: %q
+
+# Optional: enable the HTTP/REST gateway on a separate port.
+# When set, REST clients can call all gRPC methods via JSON over HTTP.
+# Requires the x-ledger-store and x-api-key HTTP headers (same as gRPC).
+# http_listen: "localhost:8080"
 
 # Optional: write daemon logs to a file instead of stderr.
 # log_file: ""

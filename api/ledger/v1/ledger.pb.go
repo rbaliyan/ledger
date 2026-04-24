@@ -7,6 +7,7 @@
 package ledgerv1
 
 import (
+	_ "google.golang.org/genproto/googleapis/api/annotations"
 	protoreflect "google.golang.org/protobuf/reflect/protoreflect"
 	protoimpl "google.golang.org/protobuf/runtime/protoimpl"
 	timestamppb "google.golang.org/protobuf/types/known/timestamppb"
@@ -120,8 +121,9 @@ func (x *EntryInput) GetTags() []string {
 // Entry is a stored ledger entry returned by Read.
 type Entry struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// id is the store-assigned unique identifier (decimal int64 for SQL backends,
-	// hex ObjectID string for MongoDB).
+	// id is the store-assigned unique identifier. The format depends on the
+	// backend: decimal int64 string for SQLite/PostgreSQL, MongoDB ObjectID
+	// hex string, or a 32-char time-ordered hex string for ClickHouse.
 	Id string `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
 	// stream is the stream this entry belongs to.
 	Stream string `protobuf:"bytes,2,opt,name=stream,proto3" json:"stream,omitempty"`
@@ -1432,7 +1434,7 @@ var File_ledger_v1_ledger_proto protoreflect.FileDescriptor
 
 const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\n" +
-	"\x16ledger/v1/ledger.proto\x12\tledger.v1\x1a\x1fgoogle/protobuf/timestamp.proto\"\x99\x02\n" +
+	"\x16ledger/v1/ledger.proto\x12\tledger.v1\x1a\x1cgoogle/api/annotations.proto\x1a\x1fgoogle/protobuf/timestamp.proto\"\x99\x02\n" +
 	"\n" +
 	"EntryInput\x12\x18\n" +
 	"\apayload\x18\x01 \x01(\fR\apayload\x12\x1b\n" +
@@ -1530,19 +1532,20 @@ const file_ledger_v1_ledger_proto_rawDesc = "" +
 	"\aentries\x18\x01 \x03(\v2\x10.ledger.v1.EntryR\aentries\"\x0f\n" +
 	"\rHealthRequest\"(\n" +
 	"\x0eHealthResponse\x12\x16\n" +
-	"\x06status\x18\x01 \x01(\tR\x06status2\xf1\x05\n" +
-	"\rLedgerService\x12=\n" +
-	"\x06Append\x12\x18.ledger.v1.AppendRequest\x1a\x19.ledger.v1.AppendResponse\x127\n" +
-	"\x04Read\x12\x16.ledger.v1.ReadRequest\x1a\x17.ledger.v1.ReadResponse\x12:\n" +
-	"\x05Count\x12\x17.ledger.v1.CountRequest\x1a\x18.ledger.v1.CountResponse\x12@\n" +
-	"\aSetTags\x12\x19.ledger.v1.SetTagsRequest\x1a\x1a.ledger.v1.SetTagsResponse\x12U\n" +
-	"\x0eSetAnnotations\x12 .ledger.v1.SetAnnotationsRequest\x1a!.ledger.v1.SetAnnotationsResponse\x127\n" +
-	"\x04Trim\x12\x16.ledger.v1.TrimRequest\x1a\x17.ledger.v1.TrimResponse\x12R\n" +
-	"\rListStreamIDs\x12\x1f.ledger.v1.ListStreamIDsRequest\x1a .ledger.v1.ListStreamIDsResponse\x12O\n" +
-	"\fRenameStream\x12\x1e.ledger.v1.RenameStreamRequest\x1a\x1f.ledger.v1.RenameStreamResponse\x127\n" +
-	"\x04Stat\x12\x16.ledger.v1.StatRequest\x1a\x17.ledger.v1.StatResponse\x12=\n" +
-	"\x06Search\x12\x18.ledger.v1.SearchRequest\x1a\x19.ledger.v1.SearchResponse\x12=\n" +
-	"\x06Health\x12\x18.ledger.v1.HealthRequest\x1a\x19.ledger.v1.HealthResponseB3Z1github.com/rbaliyan/ledger/api/ledger/v1;ledgerv1b\x06proto3"
+	"\x06status\x18\x01 \x01(\tR\x06status2\xaa\t\n" +
+	"\rLedgerService\x12f\n" +
+	"\x06Append\x12\x18.ledger.v1.AppendRequest\x1a\x19.ledger.v1.AppendResponse\"'\x82\xd3\xe4\x93\x02!:\x01*\"\x1c/v1/streams/{stream}/entries\x12]\n" +
+	"\x04Read\x12\x16.ledger.v1.ReadRequest\x1a\x17.ledger.v1.ReadResponse\"$\x82\xd3\xe4\x93\x02\x1e\x12\x1c/v1/streams/{stream}/entries\x12f\n" +
+	"\x05Count\x12\x17.ledger.v1.CountRequest\x1a\x18.ledger.v1.CountResponse\"*\x82\xd3\xe4\x93\x02$\x12\"/v1/streams/{stream}/entries:count\x12s\n" +
+	"\aSetTags\x12\x19.ledger.v1.SetTagsRequest\x1a\x1a.ledger.v1.SetTagsResponse\"1\x82\xd3\xe4\x93\x02+:\x01*\x1a&/v1/streams/{stream}/entries/{id}/tags\x12\x8f\x01\n" +
+	"\x0eSetAnnotations\x12 .ledger.v1.SetAnnotationsRequest\x1a!.ledger.v1.SetAnnotationsResponse\"8\x82\xd3\xe4\x93\x022:\x01*2-/v1/streams/{stream}/entries/{id}/annotations\x12e\n" +
+	"\x04Trim\x12\x16.ledger.v1.TrimRequest\x1a\x17.ledger.v1.TrimResponse\",\x82\xd3\xe4\x93\x02&:\x01*\"!/v1/streams/{stream}/entries:trim\x12g\n" +
+	"\rListStreamIDs\x12\x1f.ledger.v1.ListStreamIDsRequest\x1a .ledger.v1.ListStreamIDsResponse\"\x13\x82\xd3\xe4\x93\x02\r\x12\v/v1/streams\x12u\n" +
+	"\fRenameStream\x12\x1e.ledger.v1.RenameStreamRequest\x1a\x1f.ledger.v1.RenameStreamResponse\"$\x82\xd3\xe4\x93\x02\x1e:\x01*\"\x19/v1/streams/{name}:rename\x12Z\n" +
+	"\x04Stat\x12\x16.ledger.v1.StatRequest\x1a\x17.ledger.v1.StatResponse\"!\x82\xd3\xe4\x93\x02\x1b\x12\x19/v1/streams/{stream}:stat\x12m\n" +
+	"\x06Search\x12\x18.ledger.v1.SearchRequest\x1a\x19.ledger.v1.SearchResponse\".\x82\xd3\xe4\x93\x02(:\x01*\"#/v1/streams/{stream}/entries:search\x12Q\n" +
+	"\x06Health\x12\x18.ledger.v1.HealthRequest\x1a\x19.ledger.v1.HealthResponse\"\x12\x82\xd3\xe4\x93\x02\f\x12\n" +
+	"/v1/healthB3Z1github.com/rbaliyan/ledger/api/ledger/v1;ledgerv1b\x06proto3"
 
 var (
 	file_ledger_v1_ledger_proto_rawDescOnce sync.Once
