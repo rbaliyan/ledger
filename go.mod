@@ -4,15 +4,15 @@ go 1.25.9
 
 require (
 	github.com/AdamKorcz/go-118-fuzz-build v0.0.0-20250520111509-a70c2aa677fa
-	github.com/ClickHouse/clickhouse-go/v2 v2.45.0
-	github.com/klauspost/compress v1.18.5
+	github.com/ClickHouse/clickhouse-go/v2 v2.46.0
+	github.com/klauspost/compress v1.18.6
 	github.com/lib/pq v1.12.3
 	go.mongodb.org/mongo-driver/v2 v2.6.0
 	go.opentelemetry.io/otel v1.43.0
 	go.opentelemetry.io/otel/metric v1.43.0
 	go.opentelemetry.io/otel/trace v1.43.0
 	google.golang.org/genproto/googleapis/api v0.0.0-20260414002931-afd174a4e478
-	google.golang.org/grpc v1.80.0
+	google.golang.org/grpc v1.81.0
 	google.golang.org/protobuf v1.36.11
 	modernc.org/sqlite v1.50.0
 )
