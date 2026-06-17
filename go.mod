@@ -7,7 +7,7 @@ require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.46.0
 	github.com/klauspost/compress v1.18.6
 	github.com/lib/pq v1.12.3
-	go.mongodb.org/mongo-driver/v2 v2.6.0
+	go.mongodb.org/mongo-driver/v2 v2.6.1
 	go.opentelemetry.io/otel v1.44.0
 	go.opentelemetry.io/otel/metric v1.44.0
 	go.opentelemetry.io/otel/trace v1.44.0
