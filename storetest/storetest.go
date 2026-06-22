@@ -700,9 +700,11 @@ func RunStoreTests[I comparable, P any](t *testing.T, store ledger.Store[I, P], 
 		}
 
 		// Backends with a managed search index (e.g. MongoDB $text) need the
-		// index created before Search can run.
+		// index created before Search can run. Backends that search without a
+		// managed index (e.g. PostgreSQL in default ILIKE mode) return
+		// ErrNotSupported here, which is not a failure — Search works directly.
 		if idx, ok := store.(ledger.SearchIndexer); ok {
-			if err := idx.EnsureSearchIndex(ctx); err != nil {
+			if err := idx.EnsureSearchIndex(ctx); err != nil && !errors.Is(err, ledger.ErrNotSupported) {
 				t.Fatalf("EnsureSearchIndex: %v", err)
 			}
 		}
