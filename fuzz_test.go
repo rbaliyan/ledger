@@ -2,8 +2,17 @@ package ledger
 
 import (
 	"encoding/json"
+	"errors"
+	"regexp"
+	"strings"
 	"testing"
 )
+
+// safeIdentifier is an independent re-statement of the safe-identifier contract
+// that ValidateName must enforce. Keeping it separate from validate.go's regexp
+// means the fuzzer cross-checks the contract rather than the implementation
+// against itself.
+var safeIdentifier = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_]*$`)
 
 func FuzzValidateName(f *testing.F) {
 	f.Add("ledger_entries")
@@ -13,11 +22,32 @@ func FuzzValidateName(f *testing.F) {
 	f.Add("Robert'; DROP TABLE --")
 	f.Add("a")
 	f.Add("_private")
+	f.Add("a b")
+	f.Add("a-b")
+	f.Add("a;b")
+	f.Add("a\"b")
 
 	f.Fuzz(func(t *testing.T, name string) {
 		err := ValidateName(name)
 		if err == nil && name == "" {
 			t.Error("empty name should be invalid")
+		}
+		if err != nil {
+			if !errors.Is(err, ErrInvalidName) {
+				t.Errorf("ValidateName(%q) error not ErrInvalidName: %v", name, err)
+			}
+			return
+		}
+		// On acceptance the name must satisfy the safe-identifier contract and
+		// must contain no SQL metacharacters that could enable injection when
+		// the name is interpolated into a table/collection identifier.
+		if !safeIdentifier.MatchString(name) {
+			t.Errorf("ValidateName accepted %q but it does not match the safe-identifier contract", name)
+		}
+		for _, bad := range []string{"'", "\"", "`", ";", "-", "/", "\\", "*", " ", "\t", "\n", "\r", "(", ")", "."} {
+			if strings.Contains(name, bad) {
+				t.Errorf("ValidateName accepted %q containing SQL metacharacter %q", name, bad)
+			}
 		}
 	})
 }

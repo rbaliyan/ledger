@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"type\":\"append\",\"stream\":\"s\",\"entries\":[{\"id\":\"1\",\"payload\":{\"a\":{\"b\":[1,2,3]}},\"schema_version\":2}]}")
