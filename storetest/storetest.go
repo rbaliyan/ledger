@@ -7,6 +7,7 @@ import (
 	"errors"
 	"reflect"
 	"slices"
+	"sync"
 	"testing"
 
 	"github.com/rbaliyan/ledger"
@@ -19,6 +20,24 @@ type TestConfig[P any] struct {
 	// PayloadEqual reports whether two payloads are equal.
 	// Defaults to reflect.DeepEqual if nil.
 	PayloadEqual func(a, b P) bool
+	// MakeSearchable, if non-nil, builds a payload that embeds the given token
+	// in a way the backend's Search can match (a substring for SQL backends, a
+	// whole word for MongoDB's $text tokeniser). When nil, the Search subtest is
+	// skipped. Only set this for backends that implement [ledger.Searcher].
+	MakeSearchable func(token string) P
+	// NoDedupKey indicates the backend does not deduplicate on DedupKey at append
+	// time (e.g. ClickHouse, whose idempotency model collapses on a stable
+	// SourceID via ReplacingMergeTree, not on DedupKey). When true, the
+	// DedupKey-based subtests are skipped because they assert semantics the
+	// backend does not implement.
+	NoDedupKey bool
+	// ForceClose, when non-nil, closes the store under test so the
+	// ForceCloseErrors subtest can assert real post-close failure modes. It is
+	// invoked as the final subtest, after every other subtest has run, so
+	// closing the shared store does not disturb earlier subtests. Implement it as
+	// a call to the store's Close. Backends that cannot close in-process (or do
+	// not surface [ledger.ErrStoreClosed]) leave it nil, and the subtest skips.
+	ForceClose func()
 }
 
 // RunStoreTests runs the standard conformance suite against any Store implementation.
@@ -79,6 +98,9 @@ func RunStoreTests[I comparable, P any](t *testing.T, store ledger.Store[I, P], 
 	})
 
 	t.Run("DedupSkipsDuplicates", func(t *testing.T) {
+		if cfg.NoDedupKey {
+			t.Skip("backend does not deduplicate on DedupKey")
+		}
 		entry := ledger.RawEntry[P]{
 			Payload:       cfg.SamplePayload,
 			DedupKey:      "dup-test-1",
@@ -114,6 +136,9 @@ func RunStoreTests[I comparable, P any](t *testing.T, store ledger.Store[I, P], 
 	})
 
 	t.Run("DedupAcrossStreams", func(t *testing.T) {
+		if cfg.NoDedupKey {
+			t.Skip("backend does not deduplicate on DedupKey")
+		}
 		entry := ledger.RawEntry[P]{
 			Payload:       cfg.SamplePayload,
 			DedupKey:      "cross-stream-key",
@@ -315,6 +340,9 @@ func RunStoreTests[I comparable, P any](t *testing.T, store ledger.Store[I, P], 
 
 		// Update tags
 		if err := store.SetTags(ctx, "test-tags", id, []string{"processed", "reviewed"}); err != nil {
+			if errors.Is(err, ledger.ErrNotSupported) {
+				t.Skip("backend does not support SetTags")
+			}
 			t.Fatalf("SetTags: %v", err)
 		}
 
@@ -343,6 +371,9 @@ func RunStoreTests[I comparable, P any](t *testing.T, store ledger.Store[I, P], 
 			"processed_at": &v1,
 			"processed_by": &v2,
 		}); err != nil {
+			if errors.Is(err, ledger.ErrNotSupported) {
+				t.Skip("backend does not support SetAnnotations")
+			}
 			t.Fatalf("SetAnnotations: %v", err)
 		}
 
@@ -376,6 +407,9 @@ func RunStoreTests[I comparable, P any](t *testing.T, store ledger.Store[I, P], 
 	t.Run("SetTags_NotFound", func(t *testing.T) {
 		var zeroID I
 		err := store.SetTags(ctx, "test-nonexistent", zeroID, []string{"x"})
+		if errors.Is(err, ledger.ErrNotSupported) {
+			t.Skip("backend does not support SetTags")
+		}
 		if !errors.Is(err, ledger.ErrEntryNotFound) {
 			t.Errorf("SetTags on missing entry: %v, want ErrEntryNotFound", err)
 		}
@@ -623,11 +657,235 @@ func RunStoreTests[I comparable, P any](t *testing.T, store ledger.Store[I, P], 
 		}
 	})
 
-	t.Run("ClosedStoreErrors", func(t *testing.T) {
-		// Test with a separate store is too complex for a generic suite.
-		// Backend-specific tests cover this. Verify the error type exists.
-		if !errors.Is(ledger.ErrStoreClosed, ledger.ErrStoreClosed) {
-			t.Error("ErrStoreClosed should match itself")
+	t.Run("Stat", func(t *testing.T) {
+		const stream = "test-stat"
+		const n = 4
+		var ids []I
+		for range n {
+			got, err := store.Append(ctx, stream, ledger.RawEntry[P]{Payload: cfg.SamplePayload, SchemaVersion: 1})
+			if err != nil {
+				t.Fatalf("append: %v", err)
+			}
+			ids = append(ids, got...)
+		}
+		if len(ids) != n {
+			t.Fatalf("appended %d ids, want %d", len(ids), n)
+		}
+
+		stat, err := store.Stat(ctx, stream)
+		if err != nil {
+			t.Fatalf("Stat: %v", err)
+		}
+		if stat.Stream != stream {
+			t.Errorf("Stat.Stream = %q, want %q", stat.Stream, stream)
+		}
+		if stat.Count != n {
+			t.Errorf("Stat.Count = %d, want %d", stat.Count, n)
+		}
+		if stat.FirstID != ids[0] {
+			t.Errorf("Stat.FirstID = %v, want %v", stat.FirstID, ids[0])
+		}
+		if stat.LastID != ids[n-1] {
+			t.Errorf("Stat.LastID = %v, want %v", stat.LastID, ids[n-1])
+		}
+	})
+
+	t.Run("Search", func(t *testing.T) {
+		searcher, ok := store.(ledger.Searcher[I, P])
+		if !ok {
+			t.Skip("backend does not implement Searcher")
+		}
+		if cfg.MakeSearchable == nil {
+			t.Skip("TestConfig.MakeSearchable not provided")
+		}
+
+		// Backends with a managed search index (e.g. MongoDB $text) need the
+		// index created before Search can run.
+		if idx, ok := store.(ledger.SearchIndexer); ok {
+			if err := idx.EnsureSearchIndex(ctx); err != nil {
+				t.Fatalf("EnsureSearchIndex: %v", err)
+			}
+		}
+
+		const stream = "test-search"
+		entries := []ledger.RawEntry[P]{
+			{Payload: cfg.MakeSearchable("needle"), SchemaVersion: 1},
+			{Payload: cfg.MakeSearchable("haystack"), SchemaVersion: 1},
+			{Payload: cfg.MakeSearchable("haystack"), SchemaVersion: 1},
+		}
+		if _, err := store.Append(ctx, stream, entries...); err != nil {
+			t.Fatalf("append: %v", err)
+		}
+
+		results, err := searcher.Search(ctx, stream, "needle")
+		if err != nil {
+			t.Fatalf("Search: %v", err)
+		}
+		if len(results) != 1 {
+			t.Errorf("Search(needle): got %d, want 1", len(results))
+		}
+
+		results, err = searcher.Search(ctx, stream, "haystack")
+		if err != nil {
+			t.Fatalf("Search haystack: %v", err)
+		}
+		if len(results) != 2 {
+			t.Errorf("Search(haystack): got %d, want 2", len(results))
+		}
+
+		results, err = searcher.Search(ctx, stream, "nonexistent-xyz")
+		if err != nil {
+			t.Fatalf("Search no-match: %v", err)
+		}
+		if len(results) != 0 {
+			t.Errorf("Search(nonexistent-xyz): got %d, want 0", len(results))
+		}
+	})
+
+	t.Run("Cursor", func(t *testing.T) {
+		cs, ok := store.(ledger.CursorStore)
+		if !ok {
+			t.Skip("backend does not implement CursorStore")
+		}
+		const name = "test-cursor-rt"
+
+		// Unset cursor reports not-found.
+		if _, found, err := cs.GetCursor(ctx, name); err != nil {
+			t.Fatalf("GetCursor (unset): %v", err)
+		} else if found {
+			t.Error("GetCursor (unset): found = true, want false")
+		}
+
+		// Round-trip a value.
+		if err := cs.SetCursor(ctx, name, "100"); err != nil {
+			t.Fatalf("SetCursor: %v", err)
+		}
+		got, found, err := cs.GetCursor(ctx, name)
+		if err != nil {
+			t.Fatalf("GetCursor: %v", err)
+		}
+		if !found || got != "100" {
+			t.Errorf("GetCursor = (%q, %v), want (%q, true)", got, found, "100")
+		}
+
+		// Advance to a higher value.
+		if err := cs.SetCursor(ctx, name, "200"); err != nil {
+			t.Fatalf("SetCursor advance: %v", err)
+		}
+		got, _, err = cs.GetCursor(ctx, name)
+		if err != nil {
+			t.Fatalf("GetCursor after advance: %v", err)
+		}
+		if got != "200" {
+			t.Errorf("GetCursor after advance = %q, want 200", got)
+		}
+	})
+
+	t.Run("FindBySourceID", func(t *testing.T) {
+		lookup, ok := store.(interface {
+			FindBySourceID(ctx context.Context, stream, sourceID string) (I, bool, error)
+		})
+		if !ok {
+			t.Skip("backend does not implement FindBySourceID")
+		}
+		const stream = "test-find-source"
+		const sourceID = "src-find-1"
+
+		ids, err := store.Append(ctx, stream, ledger.RawEntry[P]{
+			Payload:       cfg.SamplePayload,
+			SchemaVersion: 1,
+			SourceID:      sourceID,
+		})
+		if err != nil {
+			t.Fatalf("append: %v", err)
+		}
+		if len(ids) != 1 {
+			t.Fatalf("append returned %d ids, want 1", len(ids))
+		}
+
+		gotID, found, err := lookup.FindBySourceID(ctx, stream, sourceID)
+		if err != nil {
+			t.Fatalf("FindBySourceID: %v", err)
+		}
+		if !found {
+			t.Fatalf("FindBySourceID(%q): found = false, want true", sourceID)
+		}
+		if gotID != ids[0] {
+			t.Errorf("FindBySourceID id = %v, want %v", gotID, ids[0])
+		}
+
+		// Not-found case.
+		_, found, err = lookup.FindBySourceID(ctx, stream, "src-does-not-exist")
+		if err != nil {
+			t.Fatalf("FindBySourceID (missing): %v", err)
+		}
+		if found {
+			t.Error("FindBySourceID (missing): found = true, want false")
+		}
+	})
+
+	t.Run("ConcurrentAppendDedup", func(t *testing.T) {
+		if cfg.NoDedupKey {
+			t.Skip("backend does not deduplicate on DedupKey")
+		}
+		const stream = "test-concurrent-dedup"
+		const goroutines = 16
+		const dedupKey = "shared-dedup-key"
+
+		var wg sync.WaitGroup
+		for range goroutines {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				entry := ledger.RawEntry[P]{
+					Payload:       cfg.SamplePayload,
+					DedupKey:      dedupKey,
+					SchemaVersion: 1,
+				}
+				// In-memory SQLite serialises on a single connection but may still
+				// surface a transient busy error under contention; retry a bounded
+				// number of times so the dedup correctness assertion is what is tested.
+				for attempt := 0; attempt < 50; attempt++ {
+					_, err := store.Append(ctx, stream, entry)
+					if err == nil {
+						return
+					}
+					if errors.Is(err, ledger.ErrStoreClosed) {
+						return
+					}
+				}
+			}()
+		}
+		wg.Wait()
+
+		n, err := store.Count(ctx, stream)
+		if err != nil {
+			t.Fatalf("Count: %v", err)
+		}
+		if n != 1 {
+			t.Errorf("after concurrent dedup append: Count = %d, want 1 (dedup must hold under contention)", n)
+		}
+	})
+
+	// ForceCloseErrors MUST be the last subtest: it closes the shared store and
+	// asserts that subsequent operations fail with ErrStoreClosed. Earlier
+	// subtests have already completed by the time this runs.
+	t.Run("ForceCloseErrors", func(t *testing.T) {
+		if cfg.ForceClose == nil {
+			t.Skip("TestConfig.ForceClose not provided")
+		}
+		cfg.ForceClose()
+
+		_, err := store.Append(ctx, "after-close", ledger.RawEntry[P]{
+			Payload:       cfg.SamplePayload,
+			SchemaVersion: 1,
+		})
+		if !errors.Is(err, ledger.ErrStoreClosed) {
+			t.Errorf("Append after close = %v, want ErrStoreClosed", err)
+		}
+
+		if _, err := store.Read(ctx, "after-close"); !errors.Is(err, ledger.ErrStoreClosed) {
+			t.Errorf("Read after close = %v, want ErrStoreClosed", err)
 		}
 	})
 }

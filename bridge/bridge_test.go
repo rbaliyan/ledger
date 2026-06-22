@@ -10,6 +10,7 @@ import (
 
 	"github.com/rbaliyan/ledger"
 	"github.com/rbaliyan/ledger/bridge"
+	"github.com/rbaliyan/ledger/otel"
 	"github.com/rbaliyan/ledger/sqlite"
 	_ "modernc.org/sqlite"
 )
@@ -491,6 +492,94 @@ func TestReadOnlyStream(t *testing.T) {
 	}
 }
 
+// requireEventually polls cond up to ~2s in small increments and fails the test
+// if cond never becomes true. It avoids a fixed sleep so the test is both fast
+// when the condition is met early and robust under load.
+func requireEventually(t *testing.T, msg string, cond func() bool) {
+	t.Helper()
+	const (
+		timeout = 2 * time.Second
+		step    = 5 * time.Millisecond
+	)
+	deadline := time.Now().Add(timeout)
+	for {
+		if cond() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("condition not met within %s: %s", timeout, msg)
+		}
+		time.Sleep(step)
+	}
+}
+
+// TestBridge_StartStop exercises the background run/Start/Stop loop end-to-end:
+// it starts the poller, appends to the source, waits (via bounded polling) for
+// the entry to replicate to the sink, then verifies Stop returns cleanly and is
+// idempotent.
+func TestBridge_StartStop(t *testing.T) {
+	ctx := context.Background()
+
+	srcDB := newTestDB(t)
+	source, mutStore := newSourceWithMutLog(t, srcDB)
+
+	sinkDB := newTestDB(t)
+	sink := newTestStore(t, sinkDB, "orders")
+
+	r := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
+		bridge.WithInterval(5*time.Millisecond),
+		bridge.WithName("start-stop"),
+	)
+
+	r.Start(ctx)
+	// Start is idempotent — a second call is a no-op and must not panic.
+	r.Start(ctx)
+
+	payload, _ := json.Marshal(testPayload{Value: "replicated"})
+	if _, err := source.Append(ctx, "user-1", ledger.RawEntry[json.RawMessage]{
+		Payload:       payload,
+		SchemaVersion: 1,
+	}); err != nil {
+		t.Fatalf("source append: %v", err)
+	}
+
+	requireEventually(t, "entry replicated to sink", func() bool {
+		entries, err := sink.Read(ctx, "user-1")
+		return err == nil && len(entries) == 1
+	})
+
+	entries, err := sink.Read(ctx, "user-1")
+	if err != nil {
+		t.Fatalf("sink read: %v", err)
+	}
+	var got testPayload
+	if err := json.Unmarshal(entries[0].Payload, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Value != "replicated" {
+		t.Errorf("expected value 'replicated', got %q", got.Value)
+	}
+
+	// Stop must return cleanly and the background goroutine must have advanced
+	// the poll counter (proving the run loop actually executed).
+	r.Stop()
+	if r.Stats().PollCount == 0 {
+		t.Error("expected PollCount > 0 after Start/Stop, got 0")
+	}
+
+	// Stop is idempotent: a second call must not panic or block.
+	done := make(chan struct{})
+	go func() {
+		r.Stop()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Stop blocked")
+	}
+}
+
 func TestBridge_Poll(t *testing.T) {
 	ctx := context.Background()
 
@@ -617,5 +706,68 @@ func TestBridge_WithSkipMutationTypes(t *testing.T) {
 	stats := r.Stats()
 	if stats.SkipCount != 2 {
 		t.Errorf("expected SkipCount=2, got %d", stats.SkipCount)
+	}
+}
+
+// TestBridge_OtelWrappedSink verifies that a sink wrapped with otel.WrapStore
+// still replicates fully. The bridge discovers CursorStore and FindBySourceID
+// by type assertion on the sink; if the otel wrapper failed to forward those
+// optional interfaces, cursor persistence and set_tags replication would
+// silently degrade to no-ops. This guards against that regression end-to-end.
+func TestBridge_OtelWrappedSink(t *testing.T) {
+	ctx := context.Background()
+
+	srcDB := newTestDB(t)
+	source, mutStore := newSourceWithMutLog(t, srcDB)
+
+	sinkDB := newTestDB(t)
+	rawSink := newTestStore(t, sinkDB, "orders")
+
+	// Wrap the sink for instrumentation, as a user enabling OTel would.
+	sink, err := otel.WrapStore[int64, json.RawMessage](rawSink)
+	if err != nil {
+		t.Fatalf("otel.WrapStore: %v", err)
+	}
+
+	// Append, then replicate.
+	payload, _ := json.Marshal(testPayload{Value: "wrapped"})
+	ids, err := source.Append(ctx, "user-1", ledger.RawEntry[json.RawMessage]{
+		Payload:       payload,
+		SchemaVersion: 1,
+	})
+	if err != nil {
+		t.Fatalf("source append: %v", err)
+	}
+	r := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
+		bridge.WithInterval(time.Millisecond),
+		bridge.WithName("otel-sink"),
+	)
+	pollBridge(t, r)
+
+	// Cursor persistence forwarded through the wrapper: a non-empty cursor
+	// must be readable from the (wrapped) sink after the poll.
+	if cur, found, err := sink.GetCursor(ctx, "otel-sink"); err != nil || !found || cur == "" {
+		t.Errorf("GetCursor through wrapped sink = (%q, %v, %v); cursor was not persisted", cur, found, err)
+	}
+
+	// set_tags replication relies on FindBySourceID being forwarded.
+	if err := source.SetTags(ctx, "user-1", ids[0], []string{"processed"}); err != nil {
+		t.Fatalf("source set tags: %v", err)
+	}
+	r2 := mustNew[int64, int64](t, mutStore, sink, bridge.Int64Codec{},
+		bridge.WithInterval(time.Millisecond),
+		bridge.WithName("otel-sink"),
+	)
+	pollBridge(t, r2)
+
+	entries, err := rawSink.Read(ctx, "user-1")
+	if err != nil {
+		t.Fatalf("sink read: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if len(entries[0].Tags) != 1 || entries[0].Tags[0] != "processed" {
+		t.Errorf("expected tags [processed] (set_tags replicated through wrapped sink), got %v", entries[0].Tags)
 	}
 }

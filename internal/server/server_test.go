@@ -37,7 +37,17 @@ func newTestServer(t *testing.T) ledgerv1.LedgerServiceClient {
 	}
 	t.Cleanup(func() { srv.Stop(context.Background()) })
 
-	go func() { _ = srv.Serve() }()
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- srv.Serve() }()
+	t.Cleanup(func() {
+		select {
+		case err := <-serveErr:
+			if err != nil {
+				t.Errorf("Serve: %v", err)
+			}
+		default:
+		}
+	})
 
 	conn, err := grpc.NewClient(srv.Addr(), grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
