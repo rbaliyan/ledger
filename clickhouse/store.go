@@ -264,6 +264,16 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 		sb.WriteString(" AND has(JSONExtractArrayRaw(tags), ?)")
 		args = append(args, string(raw))
 	}
+	for _, tag := range o.AllTags() {
+		// Each required tag adds a separate has() clause, so the entry must
+		// contain every tag (AND semantics). Same JSON-escaping as WithTag.
+		raw, err := json.Marshal(tag)
+		if err != nil {
+			return nil, fmt.Errorf("ledger/clickhouse: read: encode tag filter: %w", err)
+		}
+		sb.WriteString(" AND has(JSONExtractArrayRaw(tags), ?)")
+		args = append(args, string(raw))
+	}
 	for _, kv := range o.MetadataFilters() {
 		sb.WriteString(" AND JSONExtractString(metadata, ?) = ?")
 		args = append(args, kv.Key, kv.Value)
