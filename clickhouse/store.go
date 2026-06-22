@@ -14,6 +14,13 @@
 // equivalent option on the source backend) to prevent the source from producing
 // mutation events that the sink cannot apply.
 //
+// The entries table uses ReplacingMergeTree keyed on (stream, id), so the sink
+// is idempotent: re-applying the same entry — from a Bridge replay, concurrent
+// Bridge instances, or an external reconciliation backfill — collapses to a
+// single row. Appends carrying a SourceID (the source entry ID) use it as the
+// row id, making that the stable dedup key. Reads issue FINAL to collapse any
+// not-yet-merged duplicates at query time.
+//
 // # Ordering and pagination
 //
 // Entries are stored with a client-generated time-ordered ID. When used as a
@@ -99,8 +106,15 @@ func New(ctx context.Context, db *sql.DB, opts ...Option) (*Store, error) {
 func (s *Store) Type() string { return s.table }
 
 func (s *Store) createTable(ctx context.Context) error {
-	// Main entries table — MergeTree, ordered by (stream, id).
-	// id is a client-generated time-ordered hex string.
+	// Main entries table — ReplacingMergeTree, ordered by (stream, id).
+	// id is a client-generated time-ordered hex string (or, when replicating, the
+	// stable source entry ID). ReplacingMergeTree makes the sink idempotent: rows
+	// sharing the same ORDER BY key (stream, id) collapse to one at merge time, so
+	// re-applied entries — from a Bridge replay, multi-instance overlap, or
+	// reconciliation backfill — never produce duplicates. Reads use FINAL to
+	// collapse not-yet-merged duplicates at query time. No version column is used:
+	// entries are append-only and byte-identical for a given (stream, id), so any
+	// surviving copy is equivalent.
 	entries := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS %s (
     id             String,
@@ -113,7 +127,7 @@ CREATE TABLE IF NOT EXISTS %s (
     tags           String        DEFAULT '[]',
     source_id      String        DEFAULT '',
     created_at     DateTime64(3, 'UTC')
-) ENGINE = MergeTree()
+) ENGINE = ReplacingMergeTree
 ORDER BY (stream, id)
 SETTINGS index_granularity = 8192`, s.table) // #nosec G201 -- table name validated by ValidateName
 	if _, err := s.db.ExecContext(ctx, entries); err != nil {
@@ -213,7 +227,13 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 	var sb strings.Builder
 	args := make([]any, 0, 4)
 
-	fmt.Fprintf(&sb, `SELECT id, stream, payload, order_key, dedup_key, schema_version, metadata, tags, source_id, created_at FROM %s WHERE stream = ?`, s.table) // #nosec G201
+	// FINAL collapses duplicate (stream, id) rows that ReplacingMergeTree has not
+	// yet merged, so reads never observe re-applied entries twice. This relies on
+	// the invariant that a re-applied entry reuses the same id (its SourceID), so
+	// duplicates share the (stream, id) ORDER BY key; FINAL does not deduplicate
+	// distinct ids. Applying FINAL before LIMIT also keeps cursor pagination
+	// correct, since collapsed rows share the id used as the cursor.
+	fmt.Fprintf(&sb, `SELECT id, stream, payload, order_key, dedup_key, schema_version, metadata, tags, source_id, created_at FROM %s FINAL WHERE stream = ?`, s.table) // #nosec G201
 	args = append(args, stream)
 
 	if o.HasAfter() {
@@ -298,8 +318,9 @@ func (s *Store) Count(ctx context.Context, stream string) (int64, error) {
 		return 0, ledger.ErrStoreClosed
 	}
 	var n int64
+	// FINAL so duplicates collapse before counting.
 	err := s.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT count() FROM %s WHERE stream = ?`, s.table), // #nosec G201
+		fmt.Sprintf(`SELECT count() FROM %s FINAL WHERE stream = ?`, s.table), // #nosec G201
 		stream,
 	).Scan(&n)
 	if err != nil {
@@ -314,11 +335,12 @@ func (s *Store) Stat(ctx context.Context, stream string) (ledger.StreamStat[stri
 		return ledger.StreamStat[string]{}, ledger.ErrStoreClosed
 	}
 	var (
-		count    int64
-		firstID  string
-		lastID   string
+		count   int64
+		firstID string
+		lastID  string
 	)
-	query := fmt.Sprintf(`SELECT count(), min(id), max(id) FROM %s WHERE stream = ?`, s.table) // #nosec G201
+	// FINAL so duplicates collapse before aggregating.
+	query := fmt.Sprintf(`SELECT count(), min(id), max(id) FROM %s FINAL WHERE stream = ?`, s.table) // #nosec G201
 	err := s.db.QueryRowContext(ctx, query, stream).Scan(&count, &firstID, &lastID)
 	if err != nil {
 		return ledger.StreamStat[string]{}, fmt.Errorf("ledger/clickhouse: stat: %w", err)
@@ -351,6 +373,12 @@ func (s *Store) SetAnnotations(_ context.Context, _, _ string, _ map[string]*str
 // Trim deletes entries with IDs lexicographically less than or equal to beforeID.
 // ClickHouse lightweight deletes are asynchronous; rows are physically removed
 // during the next background merge. Requires ClickHouse 22.8+.
+//
+// The returned count is the number of physical rows the delete affects, NOT the
+// FINAL-deduplicated logical count: the count and the DELETE both operate on
+// physical rows so they stay consistent. As a result, if a (stream, id) has
+// unmerged duplicate rows, Trim may return a larger number than Count/Read would
+// report for the same range.
 func (s *Store) Trim(ctx context.Context, stream, beforeID string) (int64, error) {
 	if s.closed.Load() {
 		return 0, ledger.ErrStoreClosed
@@ -408,8 +436,9 @@ func (s *Store) FindBySourceID(ctx context.Context, stream, sourceID string) (st
 		return "", false, ledger.ErrStoreClosed
 	}
 	var id string
+	// FINAL so a not-yet-merged duplicate cannot surface as a distinct row.
 	err := s.db.QueryRowContext(ctx,
-		fmt.Sprintf(`SELECT id FROM %s WHERE stream = ? AND source_id = ? LIMIT 1`, s.table), // #nosec G201
+		fmt.Sprintf(`SELECT id FROM %s FINAL WHERE stream = ? AND source_id = ? LIMIT 1`, s.table), // #nosec G201
 		stream, sourceID,
 	).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {

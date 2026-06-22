@@ -26,6 +26,20 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
+      clickhouse:
+        image: clickhouse/clickhouse-server:24.8
+        env:
+          CLICKHOUSE_USER: ledger_test
+          CLICKHOUSE_PASSWORD: ledger_test
+          CLICKHOUSE_DB: ledger_test
+        ports:
+          - 9000:9000
+        options: >-
+          --ulimit nofile=262144:262144
+          --health-cmd "clickhouse-client --user ledger_test --password ledger_test --query 'SELECT 1'"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - name: Checkout code
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -62,6 +76,7 @@ jobs:
         env:
           POSTGRES_DSN: postgres://ledger_test:ledger_test@localhost:5434/ledger_test?sslmode=disable
           MONGO_URI: mongodb://localhost:27020/?directConnection=true
+          CLICKHOUSE_DSN: clickhouse://ledger_test:ledger_test@127.0.0.1:9000/ledger_test
         run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
 
       - name: Upload coverage to Codecov

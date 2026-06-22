@@ -14,6 +14,14 @@ PG_USER := "ledger_test"
 PG_PASS := "ledger_test"
 PG_DB := "ledger_test"
 
+# ClickHouse container settings
+CH_CONTAINER := "ledger-clickhouse-test"
+CH_PORT := "9100"
+CH_IMAGE := "clickhouse/clickhouse-server:24.8"
+CH_USER := "ledger_test"
+CH_PASS := "ledger_test"
+CH_DB := "ledger_test"
+
 # Default recipe
 default:
     @just --list
@@ -47,16 +55,18 @@ test-race:
 test-cover:
     go test -cover ./...
 
-# Run all integration tests (MongoDB + PostgreSQL + SQLite)
-test-integration: mongo-start pg-start
+# Run all integration tests (MongoDB + PostgreSQL + ClickHouse + SQLite)
+test-integration: mongo-start pg-start clickhouse-start
     #!/usr/bin/env bash
     set -euo pipefail
     echo "Running integration tests..."
     MONGO_URI="mongodb://localhost:{{MONGO_PORT}}/?directConnection=true" \
     POSTGRES_DSN="postgres://{{PG_USER}}:{{PG_PASS}}@localhost:{{PG_PORT}}/{{PG_DB}}?sslmode=disable" \
+    CLICKHOUSE_DSN="clickhouse://{{CH_USER}}:{{CH_PASS}}@127.0.0.1:{{CH_PORT}}/{{CH_DB}}" \
     go test -v -race -count=1 ./...
     just mongo-stop
     just pg-stop
+    just clickhouse-stop
 
 # Run MongoDB integration tests only
 test-mongo: mongo-start
@@ -71,6 +81,13 @@ test-pg: pg-start
     set -euo pipefail
     POSTGRES_DSN="postgres://{{PG_USER}}:{{PG_PASS}}@localhost:{{PG_PORT}}/{{PG_DB}}?sslmode=disable" go test -v -count=1 ./postgres/...
     just pg-stop
+
+# Run ClickHouse integration tests only
+test-clickhouse: clickhouse-start
+    #!/usr/bin/env bash
+    set -euo pipefail
+    CLICKHOUSE_DSN="clickhouse://{{CH_USER}}:{{CH_PASS}}@127.0.0.1:{{CH_PORT}}/{{CH_DB}}" go test -v -count=1 ./clickhouse/...
+    just clickhouse-stop
 
 # Run SQLite tests (no external services needed)
 test-sqlite:
@@ -147,6 +164,41 @@ pg-stop:
         echo "PostgreSQL container stopped"
     fi
 
+# Start ClickHouse for testing
+clickhouse-start:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if {{DOCKER}} ps -a --format '{{"{{.Names}}"}}' | grep -q "^{{CH_CONTAINER}}$"; then
+        echo "Removing existing container {{CH_CONTAINER}}..."
+        {{DOCKER}} rm -f {{CH_CONTAINER}} > /dev/null
+    fi
+    echo "Starting ClickHouse on port {{CH_PORT}}..."
+    {{DOCKER}} run -d --name {{CH_CONTAINER}} \
+        -p {{CH_PORT}}:9000 \
+        --ulimit nofile=262144:262144 \
+        -e CLICKHOUSE_USER={{CH_USER}} \
+        -e CLICKHOUSE_PASSWORD={{CH_PASS}} \
+        -e CLICKHOUSE_DB={{CH_DB}} \
+        {{CH_IMAGE}} > /dev/null
+    echo "Waiting for ClickHouse to be ready..."
+    for i in $(seq 1 60); do
+        if {{DOCKER}} exec {{CH_CONTAINER}} clickhouse-client --user {{CH_USER}} --password {{CH_PASS}} --query "SELECT 1" > /dev/null 2>&1; then
+            echo "ClickHouse ready on port {{CH_PORT}}"
+            exit 0
+        fi
+        sleep 1
+    done
+    echo "ClickHouse failed to start within 60 seconds"
+    exit 1
+
+# Stop ClickHouse container
+clickhouse-stop:
+    #!/usr/bin/env bash
+    if {{DOCKER}} ps -a --format '{{"{{.Names}}"}}' | grep -q "^{{CH_CONTAINER}}$"; then
+        {{DOCKER}} rm -f {{CH_CONTAINER}} > /dev/null
+        echo "ClickHouse container stopped"
+    fi
+
 # Format code
 fmt:
     go fmt ./...
@@ -160,7 +212,7 @@ tidy:
     go mod tidy
 
 # Clean up containers and test cache
-clean: mongo-stop pg-stop
+clean: mongo-stop pg-stop clickhouse-stop
     go clean -testcache
 
 # Install mise tools
