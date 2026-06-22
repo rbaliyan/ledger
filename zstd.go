@@ -67,10 +67,15 @@ func NewZstdCodecLevel[T any](level zstd.EncoderLevel) (CloseableCodec[T, json.R
 
 // newZstdDecoder creates a decoder with a 64 MiB memory cap to prevent
 // decompression bombs from exhausting process memory.
+//
+// Note: WithDecodeAllCapLimit is deliberately NOT set. It caps DecodeAll output
+// to the destination slice's capacity, and Unmarshal calls DecodeAll with a nil
+// (zero-capacity) destination — which would reject every non-empty payload.
+// WithDecoderMaxMemory already bounds decompressed memory, so it provides the
+// decompression-bomb protection on its own.
 func newZstdDecoder() (*zstd.Decoder, error) {
 	return zstd.NewReader(nil,
 		zstd.WithDecoderMaxMemory(64<<20),
-		zstd.WithDecodeAllCapLimit(true),
 	)
 }
 
