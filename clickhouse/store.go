@@ -253,8 +253,16 @@ func (s *Store) Read(ctx context.Context, stream string, opts ...ledger.ReadOpti
 		args = append(args, key)
 	}
 	if tag := o.Tag(); tag != "" {
+		// tags is stored as a JSON array; has() compares against the raw JSON
+		// element. Marshal the tag so values containing quotes or backslashes
+		// produce a valid JSON string literal (e.g. `a"b` -> `"a\"b"`) rather
+		// than a malformed one that silently fails to match.
+		raw, err := json.Marshal(tag)
+		if err != nil {
+			return nil, fmt.Errorf("ledger/clickhouse: read: encode tag filter: %w", err)
+		}
 		sb.WriteString(" AND has(JSONExtractArrayRaw(tags), ?)")
-		args = append(args, fmt.Sprintf(`"%s"`, tag))
+		args = append(args, string(raw))
 	}
 	for _, kv := range o.MetadataFilters() {
 		sb.WriteString(" AND JSONExtractString(metadata, ?) = ?")
