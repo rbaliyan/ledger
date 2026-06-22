@@ -23,6 +23,7 @@ package mongodb
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -38,11 +39,11 @@ import (
 )
 
 var (
-	_ ledger.Store[string, bson.Raw]  = (*Store)(nil)
-	_ ledger.HealthChecker            = (*Store)(nil)
-	_ ledger.CursorStore              = (*Store)(nil)
+	_ ledger.Store[string, bson.Raw]    = (*Store)(nil)
+	_ ledger.HealthChecker              = (*Store)(nil)
+	_ ledger.CursorStore                = (*Store)(nil)
 	_ ledger.Searcher[string, bson.Raw] = (*Store)(nil)
-	_ ledger.SearchIndexer            = (*Store)(nil)
+	_ ledger.SearchIndexer              = (*Store)(nil)
 )
 
 type entry struct {
@@ -188,11 +189,36 @@ func (s *Store) createAsyncIndexes(ctx context.Context, logger *slog.Logger) {
 // stored in the mutation log and consumed by JSON-native sinks (e.g. ClickHouse).
 // Relaxed mode produces natural JSON numbers instead of $numberInt/$numberLong wrappers.
 func bsonToJSON(raw bson.Raw) (json.RawMessage, error) {
-	b, err := bson.MarshalExtJSON(raw, false, false)
-	if err != nil {
-		return nil, err
+	// Guard against a corrupt or truncated payload. Both bson.Raw.Validate and
+	// bson.MarshalExtJSON index the buffer using the leading int32 length prefix
+	// and panic ("index out of range") when it is malformed — e.g. a length of 0
+	// (raw[length-1] == raw[-1]). A valid BSON document is at least 5 bytes (a
+	// 4-byte length prefix plus a trailing null) and its declared length equals
+	// the buffer length, so check that framing before handing the bytes off.
+	if len(raw) < 5 {
+		return nil, fmt.Errorf("%w: bson payload too short", ledger.ErrEncode)
 	}
-	return json.RawMessage(b), nil
+	declared := int(binary.LittleEndian.Uint32(raw[:4]))
+	if declared < 5 || declared != len(raw) {
+		return nil, fmt.Errorf("%w: bson length prefix does not match payload", ledger.ErrEncode)
+	}
+	// The driver's BSON parser (both Raw.Validate and MarshalExtJSON) indexes the
+	// buffer using element length prefixes and panics on adversarial inner lengths
+	// (e.g. a string field claiming 0x7fffffff bytes). Recover and return an error
+	// rather than crashing the caller — Append transcodes untrusted payloads here
+	// when a mutation log is configured.
+	out, err := func() (b []byte, err error) {
+		defer func() {
+			if r := recover(); r != nil {
+				err = fmt.Errorf("%w: bson transcode failed: %v", ledger.ErrEncode, r)
+			}
+		}()
+		return bson.MarshalExtJSON(raw, false, false)
+	}()
+	if err != nil {
+		return nil, fmt.Errorf("%w: invalid bson payload: %v", ledger.ErrEncode, err)
+	}
+	return json.RawMessage(out), nil
 }
 
 // writeMutationEvent appends a mutation event to the mutation log.
