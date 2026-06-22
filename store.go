@@ -174,20 +174,22 @@ func (o Order) String() string {
 	}
 }
 
-// metadataKV is a key-value pair used for metadata filtering.
-type metadataKV struct{ Key, Value string }
+// FilterKV is a key-value pair used for metadata and annotation filtering.
+// It is returned by [ReadOptions.MetadataFilters] and
+// [ReadOptions.AnnotationFilters] for the benefit of Store implementors.
+type FilterKV struct{ Key, Value string }
 
 // ReadOptions holds the parsed read parameters.
 // This type is intended for Store implementors.
 type ReadOptions struct {
-	after           any
-	limit           int
-	orderKey        string
-	order           Order
-	tag             string
-	allTags         []string
-	metadataFilters    []metadataKV
-	annotationFilters  []metadataKV
+	after             any
+	limit             int
+	orderKey          string
+	order             Order
+	tag               string
+	allTags           []string
+	metadataFilters   []FilterKV
+	annotationFilters []FilterKV
 }
 
 // Limit returns the maximum number of entries to return.
@@ -209,11 +211,11 @@ func (o ReadOptions) Tag() string { return o.tag }
 func (o ReadOptions) AllTags() []string { return o.allTags }
 
 // MetadataFilters returns the metadata key-value filters, or nil if not set.
-func (o ReadOptions) MetadataFilters() []metadataKV { return o.metadataFilters }
+func (o ReadOptions) MetadataFilters() []FilterKV { return o.metadataFilters }
 
 // AnnotationFilters returns the annotation key-value filters, or nil if not set.
 // ClickHouse returns [ErrNotSupported] when any filters are present.
-func (o ReadOptions) AnnotationFilters() []metadataKV { return o.annotationFilters }
+func (o ReadOptions) AnnotationFilters() []FilterKV { return o.annotationFilters }
 
 func defaultReadOptions() ReadOptions {
 	return ReadOptions{
@@ -288,7 +290,7 @@ func WithAllTags(tags ...string) ReadOption {
 // All backends (SQLite, PostgreSQL, MongoDB, ClickHouse) support this filter.
 func WithMetadataKey(key, value string) ReadOption {
 	return func(o *ReadOptions) {
-		o.metadataFilters = append(o.metadataFilters, metadataKV{Key: key, Value: value})
+		o.metadataFilters = append(o.metadataFilters, FilterKV{Key: key, Value: value})
 	}
 }
 
@@ -298,7 +300,7 @@ func WithMetadataKey(key, value string) ReadOption {
 // ClickHouse always returns [ErrNotSupported] when this filter is used.
 func WithAnnotation(key, value string) ReadOption {
 	return func(o *ReadOptions) {
-		o.annotationFilters = append(o.annotationFilters, metadataKV{Key: key, Value: value})
+		o.annotationFilters = append(o.annotationFilters, FilterKV{Key: key, Value: value})
 	}
 }
 
