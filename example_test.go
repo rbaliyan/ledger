@@ -2,10 +2,14 @@ package ledger_test
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 
 	"github.com/rbaliyan/ledger"
+	"github.com/rbaliyan/ledger/sqlite"
+
+	_ "modernc.org/sqlite"
 )
 
 // mockStore is a minimal store for examples.
@@ -71,6 +75,56 @@ func ExampleNewStream() {
 	}
 	fmt.Println("appended:", len(ids), "entries")
 	// Output: appended: 1 entries
+}
+
+// ExampleNewStream_sqlite shows the public API against a real in-process SQLite
+// store: open a store for the "orders" type, append a typed entry to a stream,
+// and read it back.
+func ExampleNewStream_sqlite() {
+	ctx := context.Background()
+
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	defer db.Close() //nolint:errcheck
+	// A ":memory:" database is per-connection, so pin the pool to one connection
+	// to keep all operations on the same in-memory database.
+	db.SetMaxOpenConns(1)
+
+	store, err := sqlite.New(ctx, db)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	defer store.Close(ctx) //nolint:errcheck
+
+	type Order struct {
+		ID     string  `json:"id"`
+		Amount float64 `json:"amount"`
+	}
+
+	s, err := ledger.NewStream(store, "u-1", ledger.JSONCodec[Order]{})
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+
+	if _, err := s.Append(ctx, ledger.AppendInput[Order]{
+		Payload: Order{ID: "o-1", Amount: 99.99},
+	}); err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+
+	entries, err := s.Read(ctx)
+	if err != nil {
+		fmt.Println("error:", err)
+		return
+	}
+	fmt.Println("order:", entries[0].Payload.ID)
+	// Output: order: o-1
 }
 
 func ExampleNewStream_schemaVersioning() {

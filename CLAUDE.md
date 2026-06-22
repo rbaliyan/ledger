@@ -25,7 +25,8 @@ Append-only log library for Go with typed generic entries, schema versioning, de
 ledger/
 ├── store.go          # Store[I,P] interface, RawEntry[P], StoredEntry[I,P], ReadOptions, ListOptions, HealthChecker, Searcher[I,P]
 ├── stream.go         # Stream[I,P,T], Entry[I,T], AppendInput[T], Option[P]
-├── codec.go          # PayloadCodec[T,P] interface, JSONCodec[T]
+├── codec.go          # PayloadCodec[T,P] interface, JSONCodec[T], CloseableCodec[T,P]
+├── zstd.go           # NewZstdCodec[T], NewZstdCodecLevel — transparent zstd payload compression (drop-in JSONCodec replacement)
 ├── schema.go         # Upcaster[P] interface, FieldMapper (json.RawMessage), UpcasterFunc[P], upcastChain[P]
 ├── errors.go         # Sentinel errors (ErrStoreClosed, ErrStreamNotFound, ErrStreamExists, ErrNotSupported, …)
 ├── tx.go             # WithTx, TxFromContext — context-based external transactions
@@ -37,13 +38,24 @@ ledger/
 ├── postgres/         # PostgreSQL backend — Store[int64, json.RawMessage]
 │   └── store.go
 ├── mongodb/          # MongoDB backend — Store[string, bson.Raw] + BSONCodec[T]
-│   └── store.go
+│   ├── store.go
+│   └── json_store.go # JSON-native Store[string, json.RawMessage] variant
 ├── clickhouse/       # ClickHouse backend — Store[string, json.RawMessage]; SetTags/SetAnnotations unsupported
 │   └── store.go
+├── webhook/          # Write-only Store[string, json.RawMessage] sink that POSTs entries to an HTTP endpoint
+│   ├── store.go      # New, Sink (Append delivers; other methods return ErrNotSupported)
+│   ├── hmac.go       # NewHMACSigner — HMAC-SHA256 request signing RoundTripper
+│   ├── options.go    # RetryPolicy, WithHTTPClient
+│   └── retry.go      # exponential back-off retry
 ├── otel/             # Opt-in OpenTelemetry tracing + metrics wrapper
 │   └── store.go      # WrapStore, WithTracesEnabled, WithMetricsEnabled
 ├── bridge/           # Replication: poll source mutation log → apply to sink store
-│   └── bridge.go     # Bridge[SI,DI], New, IDCodec, WithSkipMutationTypes
+│   ├── bridge.go     # Bridge[SI,DI], New, IDCodec, WithSkipMutationTypes
+│   ├── lookup.go     # sinkLookup (FindBySourceID) for idempotent re-apply
+│   ├── mutation.go   # mutation event types and decoding
+│   ├── stream.go     # per-stream replication helpers
+│   ├── metrics.go    # bridge metrics
+│   └── otel.go       # opt-in OpenTelemetry instrumentation for the bridge
 ├── proto/            # Protobuf definitions
 │   └── ledger/v1/
 │       └── ledger.proto
@@ -64,13 +76,17 @@ ledger/
     ├── cli/          # Cobra commands: stream (append/read/search/count/list/stat/tag/annotate/trim/rename/tail), start/stop/status
     ├── config/       # Config struct, LoadFrom, Defaults — no discovery, explicit path only
     ├── daemon/       # PID file management (AcquirePID, ReadPID, IsAlive, RemovePID)
+    ├── replication/  # Shared mutation-log event types and context helpers (event.go, context.go)
     └── server/       # gRPC server wiring: driver registry, muxProvider, metaStore, apiKeyGuard
         ├── driver_registry.go  # RegisterDriver, DriverResources, openDriver
         ├── drivers.go          # init() registers sqlite and postgres drivers
         ├── driver_mongo.go     # MongoDB driver registration
         ├── driver_clickhouse.go # ClickHouse driver registration
-        ├── meta.go             # metaStore: human-readable name ↔ internal UUID mapping
+        ├── meta.go             # metaStore: human-readable name ↔ internal UUID mapping (SQL)
+        ├── meta_mongo.go       # metaStore implementation for MongoDB
+        ├── meta_clickhouse.go  # metaStore implementation for ClickHouse
         ├── mux.go              # muxProvider: routes calls to per-store backends, resolves stream names
+        ├── gateway.go          # HTTP/REST gateway (grpc-gateway): forwards x-ledger-store / x-api-key to gRPC
         ├── guard.go            # apiKeyGuard: SecurityGuard using shared-secret API key
         ├── hooks.go            # hookRunner: polls stores and delivers entries to HTTP endpoints
         └── server.go           # Server: New, Serve, Stop, ReloadHooks
@@ -177,6 +193,12 @@ client
 
 The `x-ledger-store` header is read by `ledgerpb.StoreMetadataHeader` and
 `x-api-key` by `ledgerpb.APIKeyMetadataHeader`.
+
+When the `http_listen` config key is set, the daemon also serves a grpc-gateway
+HTTP/REST front end (`internal/server/gateway.go`) on that address; every RPC has a
+`google.api.http` route in `proto/ledger/v1/ledger.proto` (e.g. `GET
+/v1/streams/{stream}/entries`), and the `x-ledger-store` / `x-api-key` headers are
+forwarded from HTTP to gRPC metadata.
 
 ### SecurityGuard
 

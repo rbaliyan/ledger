@@ -43,6 +43,9 @@ func TestConformance(t *testing.T) {
 	store := newTestStore(t)
 	storetest.RunStoreTests(t, store, ledger.After[int64], storetest.TestConfig[json.RawMessage]{
 		SamplePayload: json.RawMessage(`{}`),
+		MakeSearchable: func(token string) json.RawMessage {
+			return json.RawMessage(`{"event":"` + token + `"}`)
+		},
 	})
 }
 

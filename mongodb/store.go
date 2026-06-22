@@ -9,6 +9,14 @@
 // occurs, partial inserts may be committed. SQL backends use transactions for
 // atomic batch inserts.
 //
+// Replication-source caveat: when used as a [bridge.Bridge] source via
+// [WithMutationLog] without an external transaction, the mutation log is written
+// best-effort after the main write commits. A crash in the window between the two
+// loses that replication event (the entry itself remains durable). SQL backends
+// (sqlite, postgres) instead write the mutation log inside the same transaction as
+// the main write, so they offer an atomic guarantee that MongoDB does not. Prefer a
+// SQL backend as the bridge source when no replication event may be missed.
+//
 // Transaction support: pass a *mongo.Session via [ledger.WithTx] to have
 // operations participate in an external MongoDB transaction.
 package mongodb

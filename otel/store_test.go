@@ -587,3 +587,159 @@ func TestCommonAttributes_WithoutStoreType(t *testing.T) {
 		t.Errorf("want 1 attr (backend only), got %d", len(attrs))
 	}
 }
+
+// --- Optional-interface forwarding (CursorStore + FindBySourceID) ---
+
+// cursorFakeStore extends fakeStore with the optional bridge-replication
+// interfaces (ledger.CursorStore and FindBySourceID) so the forwarding paths
+// can be exercised. The plain fakeStore deliberately omits these, serving as
+// the negative (ErrNotSupported) case.
+type cursorFakeStore struct {
+	*fakeStore
+	cursors   map[string]string
+	sourceIDs map[string]int64 // key: stream + "\x00" + sourceID
+}
+
+func newCursorFakeStore(table string) *cursorFakeStore {
+	return &cursorFakeStore{
+		fakeStore: newFakeStore(table),
+		cursors:   make(map[string]string),
+		sourceIDs: make(map[string]int64),
+	}
+}
+
+// Append records the SourceID->local-ID mapping so FindBySourceID can resolve
+// replicated entries (StoredEntry does not retain SourceID).
+func (c *cursorFakeStore) Append(ctx context.Context, stream string, entries ...ledger.RawEntry[json.RawMessage]) ([]int64, error) {
+	ids, err := c.fakeStore.Append(ctx, stream, entries...)
+	if err != nil {
+		return ids, err
+	}
+	for i, e := range entries {
+		if e.SourceID != "" {
+			c.sourceIDs[stream+"\x00"+e.SourceID] = ids[i]
+		}
+	}
+	return ids, nil
+}
+
+func (c *cursorFakeStore) GetCursor(_ context.Context, name string) (string, bool, error) {
+	if c.closed {
+		return "", false, ledger.ErrStoreClosed
+	}
+	v, ok := c.cursors[name]
+	return v, ok, nil
+}
+
+func (c *cursorFakeStore) SetCursor(_ context.Context, name, cursor string) error {
+	if c.closed {
+		return ledger.ErrStoreClosed
+	}
+	c.cursors[name] = cursor
+	return nil
+}
+
+func (c *cursorFakeStore) FindBySourceID(_ context.Context, stream, sourceID string) (int64, bool, error) {
+	if c.closed {
+		return 0, false, ledger.ErrStoreClosed
+	}
+	id, ok := c.sourceIDs[stream+"\x00"+sourceID]
+	return id, ok, nil
+}
+
+var (
+	_ ledger.Store[int64, json.RawMessage] = (*cursorFakeStore)(nil)
+	_ ledger.CursorStore                   = (*cursorFakeStore)(nil)
+)
+
+// TestWrapStore_ForwardsCursorAndLookup verifies that wrapping a store which
+// implements CursorStore and FindBySourceID preserves those capabilities: the
+// type assertions the bridge performs must still succeed through the wrapper,
+// and the calls must delegate to the inner store.
+func TestWrapStore_ForwardsCursorAndLookup(t *testing.T) {
+	ctx := context.Background()
+	inner := newCursorFakeStore("orders")
+	wrapped, err := WrapStore[int64, json.RawMessage](inner)
+	if err != nil {
+		t.Fatalf("WrapStore: %v", err)
+	}
+
+	// The bridge discovers capabilities via these exact assertions
+	// (bridge.New: sink.(ledger.CursorStore), sink.(sinkLookup[DI])).
+	cs, ok := ledger.Store[int64, json.RawMessage](wrapped).(ledger.CursorStore)
+	if !ok {
+		t.Fatal("wrapped store does not satisfy ledger.CursorStore")
+	}
+	lookup, ok := ledger.Store[int64, json.RawMessage](wrapped).(interface {
+		FindBySourceID(context.Context, string, string) (int64, bool, error)
+	})
+	if !ok {
+		t.Fatal("wrapped store does not satisfy the FindBySourceID lookup interface")
+	}
+
+	// SetCursor/GetCursor delegate to the inner store.
+	if err := cs.SetCursor(ctx, "bridge-1", "0000000000000000042"); err != nil {
+		t.Fatalf("SetCursor: %v", err)
+	}
+	if got := inner.cursors["bridge-1"]; got != "0000000000000000042" {
+		t.Errorf("inner cursor = %q, want the value set through the wrapper", got)
+	}
+	cur, found, err := cs.GetCursor(ctx, "bridge-1")
+	if err != nil || !found || cur != "0000000000000000042" {
+		t.Errorf("GetCursor = (%q, %v, %v), want (0000000000000000042, true, nil)", cur, found, err)
+	}
+
+	// FindBySourceID delegates and maps a replicated source ID to the local ID.
+	id, err := inner.Append(ctx, "user-1", ledger.RawEntry[json.RawMessage]{
+		Payload:  json.RawMessage(`"x"`),
+		SourceID: "src-7",
+	})
+	if err != nil {
+		t.Fatalf("inner append: %v", err)
+	}
+	localID, found, err := lookup.FindBySourceID(ctx, "user-1", "src-7")
+	if err != nil || !found || localID != id[0] {
+		t.Errorf("FindBySourceID = (%d, %v, %v), want (%d, true, nil)", localID, found, err, id[0])
+	}
+	if _, found, _ := lookup.FindBySourceID(ctx, "user-1", "missing"); found {
+		t.Error("FindBySourceID found a nonexistent source ID")
+	}
+}
+
+// TestWrapStore_UnsupportedOptionalInterfaces verifies that wrapping a store
+// which does NOT implement the optional interfaces yields ErrNotSupported
+// rather than panicking or silently succeeding.
+func TestWrapStore_UnsupportedOptionalInterfaces(t *testing.T) {
+	ctx := context.Background()
+	wrapped, err := WrapStore[int64, json.RawMessage](newFakeStore("orders"))
+	if err != nil {
+		t.Fatalf("WrapStore: %v", err)
+	}
+
+	if _, _, err := wrapped.GetCursor(ctx, "x"); !errors.Is(err, ledger.ErrNotSupported) {
+		t.Errorf("GetCursor err = %v, want ErrNotSupported", err)
+	}
+	if err := wrapped.SetCursor(ctx, "x", "1"); !errors.Is(err, ledger.ErrNotSupported) {
+		t.Errorf("SetCursor err = %v, want ErrNotSupported", err)
+	}
+	if _, _, err := wrapped.FindBySourceID(ctx, "s", "src"); !errors.Is(err, ledger.ErrNotSupported) {
+		t.Errorf("FindBySourceID err = %v, want ErrNotSupported", err)
+	}
+}
+
+// TestWrapStore_ForwardsWithTracing exercises the traced branch of the
+// forwarding methods to ensure the span paths also delegate correctly.
+func TestWrapStore_ForwardsWithTracing(t *testing.T) {
+	ctx := context.Background()
+	inner := newCursorFakeStore("orders")
+	wrapped, err := WrapStore[int64, json.RawMessage](inner, WithTracesEnabled(true))
+	if err != nil {
+		t.Fatalf("WrapStore: %v", err)
+	}
+	if err := wrapped.SetCursor(ctx, "n", "5"); err != nil {
+		t.Fatalf("SetCursor (traced): %v", err)
+	}
+	if cur, found, err := wrapped.GetCursor(ctx, "n"); err != nil || !found || cur != "5" {
+		t.Errorf("GetCursor (traced) = (%q, %v, %v), want (5, true, nil)", cur, found, err)
+	}
+}

@@ -806,9 +806,9 @@ func (s *Store) GetCursor(ctx context.Context, name string) (string, bool, error
 // value, the write is a no-op. This prevents a lagging Bridge instance from regressing
 // the cursor position set by a faster instance.
 //
-// Note: comparison is lexicographic (TEXT). For int64 decimal cursors this is correct
-// once IDs reach two or more digits of the same length; any minor regression at
-// single-digit vs multi-digit boundaries causes idempotent replay only.
+// Note: comparison is lexicographic (TEXT). The bridge writes int64 cursors
+// zero-padded to a fixed width (see bridge.Int64Codec), so lexicographic order
+// matches numeric order and the monotonic guard is exact.
 func (s *Store) SetCursor(ctx context.Context, name, cursor string) error {
 	if s.closed.Load() {
 		return ledger.ErrStoreClosed

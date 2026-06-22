@@ -53,10 +53,58 @@ func newTestStore(t *testing.T) *mongodb.Store {
 	return store
 }
 
+// TestAppendPartialFailure_OrderedFalse verifies the documented MongoDB atomicity
+// note: InsertMany runs with ordered:false, so a batch where one entry collides
+// on an existing DedupKey still persists the non-colliding entries, and the
+// returned IDs reflect only the entries that were actually written. Env-gated on
+// MONGO_URI.
+func TestAppendPartialFailure_OrderedFalse(t *testing.T) {
+	store := newTestStore(t)
+	ctx := context.Background()
+	const stream = "partial-failure"
+
+	// Seed an entry with a dedup key that a later batch will collide on.
+	if _, err := store.Append(ctx, stream, ledger.RawEntry[bson.Raw]{
+		Payload:       mustMarshalBSON(bson.D{{Key: "n", Value: 0}}),
+		DedupKey:      "dup-key",
+		SchemaVersion: 1,
+	}); err != nil {
+		t.Fatalf("seed append: %v", err)
+	}
+
+	// Batch: first and third entries are new; the middle one collides on "dup-key".
+	ids, err := store.Append(ctx, stream,
+		ledger.RawEntry[bson.Raw]{Payload: mustMarshalBSON(bson.D{{Key: "n", Value: 1}}), DedupKey: "new-1", SchemaVersion: 1},
+		ledger.RawEntry[bson.Raw]{Payload: mustMarshalBSON(bson.D{{Key: "n", Value: 2}}), DedupKey: "dup-key", SchemaVersion: 1},
+		ledger.RawEntry[bson.Raw]{Payload: mustMarshalBSON(bson.D{{Key: "n", Value: 3}}), DedupKey: "new-2", SchemaVersion: 1},
+	)
+	// A dedup (11000) collision is a benign skip, not a returned error.
+	if err != nil {
+		t.Fatalf("Append with one dedup collision returned error: %v", err)
+	}
+	// Only the two non-colliding entries are written and returned.
+	if len(ids) != 2 {
+		t.Errorf("returned %d ids, want 2 (partial success, collision skipped)", len(ids))
+	}
+
+	// The stream holds the seed plus the two new entries = 3 total.
+	n, err := store.Count(ctx, stream)
+	if err != nil {
+		t.Fatalf("Count: %v", err)
+	}
+	if n != 3 {
+		t.Errorf("Count = %d, want 3 (seed + 2 non-colliding)", n)
+	}
+}
+
 func TestConformance(t *testing.T) {
 	store := newTestStore(t)
 	storetest.RunStoreTests(t, store, ledger.After[string], storetest.TestConfig[bson.Raw]{
 		SamplePayload: mustMarshalBSON(bson.D{{Key: "x", Value: 1}}),
+		MakeSearchable: func(token string) bson.Raw {
+			// Plain-word value so MongoDB's $text tokeniser matches the term.
+			return mustMarshalBSON(bson.D{{Key: "event", Value: token}})
+		},
 	})
 }
 

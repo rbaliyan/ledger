@@ -22,8 +22,10 @@ import (
 
 // Compile-time interface checks.
 var (
-	_ ledger.Store[int64, []byte] = (*InstrumentedStore[int64, []byte])(nil)
-	_ ledger.HealthChecker        = (*InstrumentedStore[int64, []byte])(nil)
+	_ ledger.Store[int64, []byte]    = (*InstrumentedStore[int64, []byte])(nil)
+	_ ledger.HealthChecker           = (*InstrumentedStore[int64, []byte])(nil)
+	_ ledger.CursorStore             = (*InstrumentedStore[int64, []byte])(nil)
+	_ ledger.Searcher[int64, []byte] = (*InstrumentedStore[int64, []byte])(nil)
 )
 
 // InstrumentedStore wraps a [ledger.Store] with OpenTelemetry tracing and metrics.
@@ -44,6 +46,12 @@ type InstrumentedStore[I comparable, P any] struct {
 // If the underlying store exposes a Type() string method (as all concrete
 // backends do), the table or collection name is recorded on all spans and
 // metrics as the "ledger.store_type" attribute.
+//
+// The wrapper is capability-transparent: it forwards the optional [ledger.Searcher],
+// [ledger.HealthChecker], and [ledger.CursorStore] interfaces, plus FindBySourceID,
+// returning [ledger.ErrNotSupported] when the inner store lacks them. An instrumented
+// store can therefore be used as a bridge replication sink without silently losing
+// cursor persistence or set_tags/set_annotations/trim replication.
 func WrapStore[I comparable, P any](store ledger.Store[I, P], opts ...Option) (*InstrumentedStore[I, P], error) {
 	o := defaultOptions()
 	for _, opt := range opts {
@@ -433,6 +441,109 @@ func (s *InstrumentedStore[I, P]) Health(ctx context.Context) error {
 	}
 
 	return err
+}
+
+// GetCursor returns the replication cursor named name, delegating to the wrapped
+// store if it implements [ledger.CursorStore]. Returns [ledger.ErrNotSupported]
+// otherwise. Forwarding this method keeps an instrumented store usable as a
+// bridge sink (which discovers cursor support by type-assertion).
+func (s *InstrumentedStore[I, P]) GetCursor(ctx context.Context, name string) (string, bool, error) {
+	cs, ok := s.store.(ledger.CursorStore)
+	if !ok {
+		return "", false, ledger.ErrNotSupported
+	}
+	if !s.opts.enableTraces {
+		start := time.Now()
+		cursor, found, err := cs.GetCursor(ctx, name)
+		s.recordOperation(ctx, "get_cursor", "", start, err)
+		return cursor, found, err
+	}
+	ctx, span := s.tracer.Start(ctx, "ledger.GetCursor",
+		trace.WithAttributes(s.commonAttributes()...))
+	defer span.End()
+
+	start := time.Now()
+	cursor, found, err := cs.GetCursor(ctx, name)
+	s.recordOperation(ctx, "get_cursor", "", start, err)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+	return cursor, found, err
+}
+
+// SetCursor persists the replication cursor named name, delegating to the wrapped
+// store if it implements [ledger.CursorStore]. Returns [ledger.ErrNotSupported]
+// otherwise.
+func (s *InstrumentedStore[I, P]) SetCursor(ctx context.Context, name string, cursor string) error {
+	cs, ok := s.store.(ledger.CursorStore)
+	if !ok {
+		return ledger.ErrNotSupported
+	}
+	if !s.opts.enableTraces {
+		start := time.Now()
+		err := cs.SetCursor(ctx, name, cursor)
+		s.recordOperation(ctx, "set_cursor", "", start, err)
+		return err
+	}
+	ctx, span := s.tracer.Start(ctx, "ledger.SetCursor",
+		trace.WithAttributes(s.commonAttributes()...))
+	defer span.End()
+
+	start := time.Now()
+	err := cs.SetCursor(ctx, name, cursor)
+	s.recordOperation(ctx, "set_cursor", "", start, err)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+	return err
+}
+
+// FindBySourceID returns the local entry ID for a replicated source entry,
+// delegating to the wrapped store if it implements the lookup interface
+// (used by bridge replication). Returns [ledger.ErrNotSupported] otherwise.
+// Forwarding this method keeps SetTags/SetAnnotations/Trim replication working
+// when a sink store is wrapped for instrumentation.
+func (s *InstrumentedStore[I, P]) FindBySourceID(ctx context.Context, stream, sourceID string) (I, bool, error) {
+	lookup, ok := s.store.(sourceIDLookup[I])
+	if !ok {
+		var zero I
+		return zero, false, ledger.ErrNotSupported
+	}
+	if !s.opts.enableTraces {
+		start := time.Now()
+		id, found, err := lookup.FindBySourceID(ctx, stream, sourceID)
+		s.recordOperation(ctx, "find_by_source_id", stream, start, err)
+		return id, found, err
+	}
+	attrs := append(s.commonAttributes(),
+		attribute.String("ledger.stream", stream),
+		attribute.String("ledger.source_id", sourceID),
+	)
+	ctx, span := s.tracer.Start(ctx, "ledger.FindBySourceID", trace.WithAttributes(attrs...))
+	defer span.End()
+
+	start := time.Now()
+	id, found, err := lookup.FindBySourceID(ctx, stream, sourceID)
+	s.recordOperation(ctx, "find_by_source_id", stream, start, err)
+	if err != nil {
+		span.RecordError(err)
+		span.SetStatus(codes.Error, err.Error())
+	} else {
+		span.SetStatus(codes.Ok, "")
+	}
+	return id, found, err
+}
+
+// sourceIDLookup mirrors the (unexported) bridge sink-lookup interface so an
+// instrumented store can detect and forward FindBySourceID support.
+type sourceIDLookup[I comparable] interface {
+	FindBySourceID(ctx context.Context, stream, sourceID string) (I, bool, error)
 }
 
 // commonAttributes returns attributes shared by all spans and metrics.

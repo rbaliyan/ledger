@@ -11,7 +11,22 @@ import (
 	_ "github.com/ClickHouse/clickhouse-go/v2" // register "clickhouse" driver
 	"github.com/rbaliyan/ledger"
 	"github.com/rbaliyan/ledger/clickhouse"
+	"github.com/rbaliyan/ledger/storetest"
 )
+
+// TestConformance runs the shared backend-agnostic conformance suite against
+// ClickHouse. ClickHouse does not deduplicate on DedupKey (its idempotency
+// model collapses same-(stream, id) rows via ReplacingMergeTree on a stable
+// SourceID), so the DedupKey subtests are skipped via NoDedupKey. SetTags and
+// SetAnnotations return ErrNotSupported; the suite skips those subtests when it
+// sees ErrNotSupported. Env-gated on CLICKHOUSE_DSN like the other backends.
+func TestConformance(t *testing.T) {
+	store, _ := newTestStore(t, "ledger_ch_conformance")
+	storetest.RunStoreTests(t, store, ledger.After[string], storetest.TestConfig[json.RawMessage]{
+		SamplePayload: json.RawMessage(`{}`),
+		NoDedupKey:    true,
+	})
+}
 
 // newTestStore opens a ClickHouse store against CLICKHOUSE_DSN, creating a
 // freshly-named table per test and dropping it on cleanup. Skips when the DSN

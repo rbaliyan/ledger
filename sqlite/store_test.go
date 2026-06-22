@@ -41,6 +41,12 @@ func TestConformance(t *testing.T) {
 	store := newTestStore(t)
 	storetest.RunStoreTests(t, store, ledger.After[int64], storetest.TestConfig[json.RawMessage]{
 		SamplePayload: json.RawMessage(`{}`),
+		MakeSearchable: func(token string) json.RawMessage {
+			return json.RawMessage(`{"event":"` + token + `"}`)
+		},
+		// ForceClose closes the store under test so the conformance suite can
+		// assert real post-close failure modes. Runs as the final subtest.
+		ForceClose: func() { store.Close(context.Background()) },
 	})
 }
 
