@@ -98,6 +98,14 @@ jobs:
           echo "In-process package coverage: ${TOTAL}% (threshold ${THRESHOLD}%)"
           awk -v t="$THRESHOLD" -v c="$TOTAL" 'BEGIN { if (c+0 < t+0) { printf "coverage %.1f%% is below threshold %.1f%%\n", c, t; exit 1 } }'
 
+      - name: Benchmark smoke test
+        # Run every benchmark once to catch compile/panic regressions cheaply.
+        # -benchtime=10x keeps it fast; the benchmarks are deterministic and
+        # dep-free (in-memory SQLite, pure functions), so this is not a
+        # performance gate — just a guard that the bench suite still builds and
+        # runs without panicking.
+        run: go test -run '^$' -bench=. -benchtime=10x ./...
+
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0
         with:

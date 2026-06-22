@@ -231,9 +231,15 @@ vulncheck:
 depcheck:
     go list -m -u all | grep '\[' || echo "All dependencies are up to date"
 
+# Quick local fuzz smoke-check of one target (default 20s).
+# Usage: just fuzz FuzzValidateName . 20s
+# Targets are registered for CI in .clusterfuzzlite/build.sh.
+fuzz target='FuzzValidateName' pkg='.' time='20s':
+    go test -run '^$' -fuzz='^{{target}}$' -fuzztime={{time}} {{pkg}}
+
 # Run benchmarks
 bench:
-    go test -bench=. -benchmem ./sqlite/...
+    go test -bench=. -benchmem ./...
 
 # Create and push a new release tag (bumps patch version)
 release:

@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/rbaliyan/ledger"
@@ -18,8 +20,14 @@ func benchStore(b *testing.B) *sqlite.Store {
 	if err != nil {
 		b.Fatal(err)
 	}
+	// Pin to a single connection: a :memory: database is per-connection, so a
+	// pooled second connection would not see the table created on the first.
+	db.SetMaxOpenConns(1)
 	b.Cleanup(func() { db.Close() })
-	store, err := sqlite.New(context.Background(), db)
+	// Discard the async index-creation warnings so they don't drown the
+	// benchmark output.
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	store, err := sqlite.New(context.Background(), db, sqlite.WithLogger(logger))
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -30,55 +38,68 @@ func benchStore(b *testing.B) *sqlite.Store {
 func BenchmarkAppend(b *testing.B) {
 	store := benchStore(b)
 	ctx := context.Background()
-	entry := ledger.RawEntry[json.RawMessage]{
-		Payload:       json.RawMessage(`{"id":"bench","amount":42.5}`),
-		OrderKey:      "key-1",
-		SchemaVersion: 1,
+	payload := json.RawMessage(`{"id":"bench","amount":42.5}`)
+
+	// Pre-generate dedup keys so the timed loop only measures Append.
+	dedupKeys := make([]string, b.N)
+	for i := range dedupKeys {
+		dedupKeys[i] = fmt.Sprintf("d-%d", i)
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for i := range b.N {
 		store.Append(ctx, "bench", ledger.RawEntry[json.RawMessage]{
-			Payload:       entry.Payload,
-			OrderKey:      entry.OrderKey,
-			DedupKey:      fmt.Sprintf("d-%d", i),
-			SchemaVersion: entry.SchemaVersion,
+			Payload:       payload,
+			OrderKey:      "key-1",
+			DedupKey:      dedupKeys[i],
+			SchemaVersion: 1,
 		})
 	}
 }
 
 func BenchmarkAppendBatch(b *testing.B) {
-	store := benchStore(b)
-	ctx := context.Background()
+	for _, n := range []int{1, 10, 100} {
+		b.Run(fmt.Sprintf("n=%d", n), func(b *testing.B) {
+			store := benchStore(b)
+			ctx := context.Background()
 
-	batch := make([]ledger.RawEntry[json.RawMessage], 100)
-	for i := range batch {
-		batch[i] = ledger.RawEntry[json.RawMessage]{
-			Payload:       json.RawMessage(`{"id":"bench"}`),
-			SchemaVersion: 1,
-		}
-	}
+			batch := make([]ledger.RawEntry[json.RawMessage], n)
+			for i := range batch {
+				batch[i] = ledger.RawEntry[json.RawMessage]{
+					Payload:       json.RawMessage(`{"id":"bench"}`),
+					SchemaVersion: 1,
+				}
+			}
 
-	b.ResetTimer()
-	for range b.N {
-		store.Append(ctx, "bench-batch", batch...)
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				store.Append(ctx, "bench-batch", batch...)
+			}
+		})
 	}
 }
 
 func BenchmarkRead(b *testing.B) {
-	store := benchStore(b)
-	ctx := context.Background()
+	for _, total := range []int{100, 1000} {
+		b.Run(fmt.Sprintf("n=%d", total), func(b *testing.B) {
+			store := benchStore(b)
+			ctx := context.Background()
 
-	for i := range 1000 {
-		store.Append(ctx, "bench-read", ledger.RawEntry[json.RawMessage]{
-			Payload:       json.RawMessage(fmt.Sprintf(`{"i":%d}`, i)),
-			SchemaVersion: 1,
+			for i := range total {
+				store.Append(ctx, "bench-read", ledger.RawEntry[json.RawMessage]{
+					Payload:       json.RawMessage(fmt.Sprintf(`{"i":%d}`, i)),
+					SchemaVersion: 1,
+				})
+			}
+
+			b.ReportAllocs()
+			b.ResetTimer()
+			for range b.N {
+				store.Read(ctx, "bench-read", ledger.Limit(100))
+			}
 		})
-	}
-
-	b.ResetTimer()
-	for range b.N {
-		store.Read(ctx, "bench-read", ledger.Limit(100))
 	}
 }
 
@@ -93,6 +114,7 @@ func BenchmarkReadWithCursor(b *testing.B) {
 		})
 	}
 
+	b.ReportAllocs()
 	b.ResetTimer()
 	for range b.N {
 		var cursor int64
