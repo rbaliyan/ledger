@@ -124,6 +124,21 @@ every CLI call (or set it in the config file used by the client).
 **TLS** — set `tls.cert`, `tls.key`, and optionally `tls.ca` (mutual TLS) in the
 config. Pass the same paths with `--config` on the client side.
 
+### REST Gateway
+
+Set `http_listen` in `config.yaml` (e.g. `http_listen: "localhost:8080"`) to expose a
+JSON/REST gateway alongside gRPC. Every RPC has an HTTP route (see the
+`google.api.http` annotations in `proto/ledger/v1/ledger.proto`); leaving `http_listen`
+empty disables the gateway. The `x-ledger-store` and `x-api-key` headers are forwarded
+from HTTP to gRPC metadata, so the same store-selection and API-key rules apply.
+
+```bash
+# Read entries from the "orders" stream in the "ledger_entries" store
+curl -H 'x-ledger-store: ledger_entries' \
+     -H 'x-api-key: my-secret' \
+     'http://localhost:8080/v1/streams/orders/entries?limit=10'
+```
+
 ### Stream Subcommands
 
 All stream subcommands accept `--store` (table/collection name, default `ledger_entries`)
@@ -140,7 +155,7 @@ ledger stream read --stream orders
 ledger stream read --stream orders --desc --limit 20 --tag pending
 ledger stream read --stream orders --after 42 --order-key customer-1
 
-# Search payloads (substring match; SQLite and PostgreSQL only via daemon)
+# Search payloads (substring match; SQLite, PostgreSQL, and MongoDB — not ClickHouse)
 ledger stream search "login"
 ledger stream search --stream orders "failed"
 
@@ -180,6 +195,13 @@ ledger stream tail --stream orders --interval 1s
 All four backends are supported by the daemon. Configure the backend in `config.yaml` via
 the `db.type` field (`sqlite`, `postgres`, `mongodb`, or `clickhouse`).
 
+> **Bridge-source caveat (MongoDB):** SQL backends (SQLite, PostgreSQL) write the
+> replication mutation log inside the same transaction as the main entry write, so the
+> two are committed atomically. MongoDB writes the mutation log best-effort *after* the
+> main write commits — a crash in the window between the two loses the replication event
+> (the entry itself is still durable). Prefer SQLite or PostgreSQL as the bridge source
+> when no replication event may be missed.
+
 ---
 
 ## Advanced Features
@@ -203,6 +225,26 @@ s, err := ledger.NewStream(store, "orders", ledger.JSONCodec[OrderV2]{},
         AddDefault("email", "unknown@example.com")),
 )
 ```
+
+### Payload Compression
+
+`NewZstdCodec[T]()` is a drop-in replacement for `JSONCodec[T]` that transparently
+compresses payloads with zstd on write. It decodes both compressed and plain payloads,
+so a store can migrate from `JSONCodec` to the zstd codec without rewriting existing
+entries — old and new entries coexist in the same stream. Pass it as the 3rd argument
+to `NewStream`:
+
+```go
+codec, err := ledger.NewZstdCodec[Order]()
+if err != nil {
+    panic(err)
+}
+defer codec.Close() // CloseableCodec releases decoder goroutines
+
+s, err := ledger.NewStream(ordersStore, "user-123", codec)
+```
+
+Use `NewZstdCodecLevel(level)` to pick a specific compression level.
 
 ### OpenTelemetry Instrumentation
 
@@ -250,6 +292,9 @@ hooks:
     secret: "hmac-secret"  # signs each POST with X-Ledger-Signature (HMAC-SHA256)
     max_retries: 5
     interval: "5s"
+    stream: ""             # optional: watch only this stream (empty = all streams in the store)
+    ca: ""                 # optional: path to CA cert for TLS verification
+    insecure_skip_verify: false  # optional: skip TLS certificate verification (insecure)
 ```
 
 Send SIGHUP to reload hooks without restarting the daemon:
@@ -257,6 +302,12 @@ Send SIGHUP to reload hooks without restarting the daemon:
 ```bash
 kill -HUP $(cat ~/.ledger/ledger.pid)
 ```
+
+The reusable building block behind hooks is the `webhook` package
+(`webhook.New`, `Sink`, `NewHMACSigner`, `WithHTTPClient`, `RetryPolicy`): a write-only
+`ledger.Store[string, json.RawMessage]` that POSTs appended entries to a URL with
+HMAC-SHA256 signing and exponential-backoff retries. Use it directly as a `bridge.Bridge`
+sink to fan ledger writes out to an HTTP endpoint from your own Go code.
 
 ---
 
