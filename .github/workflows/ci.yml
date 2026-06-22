@@ -77,7 +77,26 @@ jobs:
           POSTGRES_DSN: postgres://ledger_test:ledger_test@localhost:5434/ledger_test?sslmode=disable
           MONGO_URI: mongodb://localhost:27020/?directConnection=true
           CLICKHOUSE_DSN: clickhouse://ledger_test:ledger_test@127.0.0.1:9000/ledger_test
-        run: go test -race -coverprofile=coverage.out -covermode=atomic ./...
+        run: go test -tags=integration -race -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: Enforce coverage gate on in-process packages
+        # These packages have no external (Docker-gated) dependencies, so their
+        # coverage is deterministic across runs. Gate total coverage over them at
+        # a conservative threshold to catch regressions without flaking on the
+        # backend-gated packages.
+        run: |
+          set -euo pipefail
+          THRESHOLD=75.0
+          PKGS="github.com/rbaliyan/ledger \
+                github.com/rbaliyan/ledger/webhook \
+                github.com/rbaliyan/ledger/internal/config \
+                github.com/rbaliyan/ledger/internal/daemon \
+                github.com/rbaliyan/ledger/ledgerpb"
+          # shellcheck disable=SC2086
+          go test -coverprofile=cover-gate.out -covermode=atomic $PKGS
+          TOTAL=$(go tool cover -func=cover-gate.out | awk '/^total:/ {gsub(/%/,"",$3); print $3}')
+          echo "In-process package coverage: ${TOTAL}% (threshold ${THRESHOLD}%)"
+          awk -v t="$THRESHOLD" -v c="$TOTAL" 'BEGIN { if (c+0 < t+0) { printf "coverage %.1f%% is below threshold %.1f%%\n", c, t; exit 1 } }'
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@fb8b3582c8e4def4969c97caa2f19720cb33a72f # v7.0.0

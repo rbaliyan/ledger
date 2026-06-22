@@ -55,6 +55,10 @@ test-race:
 test-cover:
     go test -cover ./...
 
+# Run the fast smoke and example subset (no external services)
+smoke:
+    go test -run 'Smoke|Example|TestServer|TestGateway' -count=1 ./internal/server/... ./internal/daemon/... ./internal/cli/... .
+
 # Run all integration tests (MongoDB + PostgreSQL + ClickHouse + SQLite)
 test-integration: mongo-start pg-start clickhouse-start
     #!/usr/bin/env bash
@@ -63,7 +67,7 @@ test-integration: mongo-start pg-start clickhouse-start
     MONGO_URI="mongodb://localhost:{{MONGO_PORT}}/?directConnection=true" \
     POSTGRES_DSN="postgres://{{PG_USER}}:{{PG_PASS}}@localhost:{{PG_PORT}}/{{PG_DB}}?sslmode=disable" \
     CLICKHOUSE_DSN="clickhouse://{{CH_USER}}:{{CH_PASS}}@127.0.0.1:{{CH_PORT}}/{{CH_DB}}" \
-    go test -v -race -count=1 ./...
+    go test -tags=integration -v -race -count=1 ./...
     just mongo-stop
     just pg-stop
     just clickhouse-stop
