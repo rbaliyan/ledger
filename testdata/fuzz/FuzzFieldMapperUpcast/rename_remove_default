@@ -1,0 +1,2 @@
+go test fuzz v1
+[]byte("{\"old\":\"v\",\"legacy_id\":99,\"keep\":1}")
