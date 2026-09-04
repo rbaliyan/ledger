@@ -12,6 +12,12 @@ jobs:
     name: Fuzz (PR)
     runs-on: ubuntu-latest
     permissions:
+      # actions: read lets the ClusterFuzzLite filestore list and download
+      # the corpus it stored as workflow artifacts. A job-level permissions
+      # block REPLACES the workflow-level `read-all`, so it must be restated
+      # here or the corpus fetch loses it.
+      actions: read
+      contents: read
       security-events: write
     steps:
       - name: Checkout code
@@ -21,6 +27,7 @@ jobs:
         id: build
         uses: google/clusterfuzzlite/actions/build_fuzzers@52ecc61cb587ee99c26825a112a21abf19c7448c # v1
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           language: go
           sanitizer: address
 
@@ -28,6 +35,7 @@ jobs:
         id: run
         uses: google/clusterfuzzlite/actions/run_fuzzers@52ecc61cb587ee99c26825a112a21abf19c7448c # v1
         with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           mode: code-change
           fuzz-seconds: 60
           output-sarif: true
